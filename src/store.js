@@ -75,6 +75,7 @@ class Store {
     this.notifications = [];       // SMS/email delivery log, newest first
     this.comm = new Map();         // loco_id -> live comm telemetry (rssi, packet_loss, lte...)
     this._lastLogged = new Map();  // sensor_id -> ms timestamp of last history-logged point (throttle)
+    this._discStreak = new Map();  // sensor_id -> consecutive DISCONNECTED count (debounce false blips)
     this._notifier = null;         // server sets: fn(alert) => dispatch
     this._alertSeq = 1;
     this._saveTimer = null;
@@ -724,13 +725,28 @@ class Store {
       vib, io_link_status: r.io_link_status || null,
     };
     // DISCONNECTED comes explicitly from the IO-Link bridge (BNI sensor not
-    // physically connected). Clear temp/vib immediately and skip alerting —
-    // mirrors v7 behavior so the frontend blanks the tile right away.
+    // physically connected, or a momentary read miss on the device's MQTT
+    // cycle). A SINGLE DISCONNECTED reading is treated as a possible blip and
+    // does NOT blank the tile — only after 2 consecutive DISCONNECTED reports
+    // for the same sensor do we actually clear temp/vib. This avoids the
+    // dashboard flickering to "DISCONNECTED" on a one-off timing glitch while
+    // still catching a genuine unplug within a couple of push cycles.
     if (meta.io_link_status === 'DISCONNECTED') {
-      meta.temperature = null; meta.vib = null; meta.status = 'online';
+      const streak = (this._discStreak.get(r.sensor_id) || 0) + 1;
+      this._discStreak.set(r.sensor_id, streak);
+      if (streak >= 2) {
+        meta.temperature = null; meta.vib = null; meta.status = 'online';
+        this.sensors.set(r.sensor_id, meta);
+        return meta;
+      }
+      // First miss: keep showing the last known good reading, don't overwrite it.
+      const prev = this.sensors.get(r.sensor_id);
+      if (prev) { prev.last_update = eventTime; return prev; }
+      meta.temperature = null; meta.vib = null;
       this.sensors.set(r.sensor_id, meta);
       return meta;
     }
+    this._discStreak.set(r.sensor_id, 0);
 
     // Backfilled (older than the current live reading): archive to history only,
     // do NOT overwrite the live value or fire alerts for stale data.

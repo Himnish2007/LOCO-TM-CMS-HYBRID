@@ -19,12 +19,13 @@ os.execute("sleep 3")
 
 local socket = require("socket")
 
-local RAILWAY  = "https://loco-tm-cms-production.up.railway.app/api/data/ingest"
+local RAILWAY  = "https://loco-tm-cms-hybrid-production.up.railway.app/api/data/ingest"
 local API_KEY  = "himnish_data_key_2024"
 local LOCO_IP  = "192.168.1.1"
+local LOCO_ID  = "WAP7-30211"
 local SERIAL   = "HU00945596900021"
 local INTERVAL = 2
-local SENSOR_TIMEOUT = 15
+local SENSOR_TIMEOUT = 45
 
 local PORT_MAP = {
   ["master1port1"]="TM1",["master1port2"]="TM2",["master1port3"]="TM3",
@@ -85,7 +86,7 @@ end
 
 local function build_json(tm_data)
   local ts=os.date("!%Y-%m-%dT%H:%M:%SZ")
-  local j='{"locoIp":"'..LOCO_IP..'","timestamp":"'..ts..'","tmData":{'
+  local j='{"locoId":"'..LOCO_ID..'","locoIp":"'..LOCO_IP..'","timestamp":"'..ts..'","tmData":{'
   local f=true
   for tm,d in pairs(tm_data) do
     if not f then j=j.."," end
