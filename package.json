@@ -1,7 +1,7 @@
 {
-  "name": "himnish-raip-loco-hybrid",
-  "version": "1.1.0",
-  "description": "HYBRID: HIMNISH RAIP modular Loco TM platform (multi-loco, RBAC, Digital Twin, Postgres) + LOCO-TM-CMS-v7's live hardware vibration/temp ingest pipeline (WAP-7 #30211, RUT200 + BNI IO-Link, unchanged contract)",
+  "name": "loco-tm-cms-hybrid",
+  "version": "1.3.0",
+  "description": "LOCO TM CMS (HYBRID): multi-loco RBAC platform (Digital Twin, Postgres) + the LIVE hardware vibration/temp ingest pipeline (WAP-7 #30211, RUT200 + BNI IO-Link, unchanged contract)",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {

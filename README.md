@@ -1,6 +1,6 @@
-# HIMNISH RAIP — Loco TM Monitoring — HYBRID (v7 hardware + full feature set)
+# LOCO TM CMS — HYBRID (v7 live hardware + full feature set)
 
-**This is the hybrid build.** Base architecture is the modular HIMNISH RAIP
+**This is the hybrid build.** Base architecture is the modular Loco TM CMS
 platform (multi-loco, 5-role RBAC, Digital Twin, Heatmap, GIS Map, Analytics,
 Predictive, Maintenance, Admin CRUD, Fleet Assistant, Audit, optional
 Postgres/TimescaleDB). Into it we've re-wired the **live, hardware-connected
@@ -40,7 +40,7 @@ proven math, unchanged.
 
 ---
 
-# HIMNISH RAIP — Loco Traction Motor Temperature Monitoring System
+# LOCO TM CMS — Traction Motor Condition Monitoring System
 
 Loco version of the EMU Motor Coach TM Monitoring platform — same architecture, same
 feature set (Digital Twin, Heatmap, GIS Map, Alerts, Analytics, Predictive, Loco Transfer,

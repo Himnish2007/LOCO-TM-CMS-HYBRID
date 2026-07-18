@@ -1,7 +1,7 @@
 'use strict';
 
 // ---------------------------------------------------------------------------
-// HIMNISH RAIP D5-LOCO - Central configuration
+// LOCO TM CMS - Central configuration
 // RAIP env-var family: JWT_SECRET, DATA_API_KEY, DEMO_MODE, CFG_*
 // ---------------------------------------------------------------------------
 

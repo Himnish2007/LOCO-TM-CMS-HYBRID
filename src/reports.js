@@ -99,7 +99,7 @@ async function toXlsx(type, store, sensors, scope) {
   wb.creator = 'HIMNISH Loco Traction Motor Monitoring';
   const ws = wb.addWorksheet((TYPES[type] || 'Report').slice(0, 30));
   ws.mergeCells('A1', 'E1');
-  ws.getCell('A1').value = 'Loco Traction Motor Temperature Monitoring System';
+  ws.getCell('A1').value = 'LOCO TM CMS';
   ws.getCell('A1').font = { bold: true, size: 14 };
   ws.getCell('A2').value = (TYPES[type] || 'Report') + ' — generated ' + new Date().toLocaleString('en-GB');
   ws.getCell('A2').font = { italic: true, size: 10 };
@@ -124,7 +124,7 @@ function toHtml(type, store, sensors, scope) {
 th,td{border:1px solid #ccc;padding:6px 8px;text-align:left}th{background:#0e7490;color:#fff}
 tr:nth-child(even) td{background:#f4f7fa}.foot{margin-top:16px;font-size:11px;color:#777}
 @media print{.noprint{display:none}}</style></head><body>
-<h1>Loco Traction Motor Temperature Monitoring System</h1>
+<h1>LOCO TM CMS</h1>
 <div class="sub">${esc(title)} · generated ${new Date().toLocaleString('en-GB')} · ${body.length} rows</div>
 <button class="noprint" onclick="window.print()" style="margin-bottom:12px;padding:8px 14px;background:#0e7490;color:#fff;border:none;border-radius:6px;cursor:pointer">Print / Save as PDF</button>
 <table><thead><tr>${head.map((h) => '<th>' + esc(h) + '</th>').join('')}</tr></thead><tbody>${rows}</tbody></table>

@@ -6,7 +6,7 @@ const bcrypt = require('bcryptjs');
 const config = require('./config');
 
 // ---------------------------------------------------------------------------
-// HIMNISH RAIP D5-LOCO - Data store (persistent master data + in-memory live data)
+// LOCO TM CMS - Data store (persistent master data + in-memory live data)
 //
 // Master data (users, SHEDS, locos, loco<->SHED assignment, transfer audit trail,
 // per-user asset assignments, threshold overrides) is persisted to a JSON file
@@ -43,7 +43,7 @@ function defaultAlertConfig() {
     templates: {
       sms: '[LOCO-TM ALERT] {severity}: {tm} on {loco} = {temp}C @ {time}',
       email_subject: 'Loco TM Alert [{severity}] {loco}',
-      email_body: 'Loco Traction Motor Temperature Monitoring System\nAlert Notification\n\nSeverity: {severity}\nMessage: {message}\nSHED: {shed}\nLoco: {loco}\nTraction Motor: {tm}\nTemperature: {temp} C\nTime: {time}\n\n- HIMNISH LIMITED',
+      email_body: 'LOCO TM CMS\nAlert Notification\n\nSeverity: {severity}\nMessage: {message}\nSHED: {shed}\nLoco: {loco}\nTraction Motor: {tm}\nTemperature: {temp} C\nTime: {time}\n\n- HIMNISH LIMITED',
     },
     report: { enabled: false, hour: 7, emails: [], base_url: '' },
   };
@@ -190,7 +190,9 @@ class Store {
   // ===== Thresholds =======================================================
   getThresholds() { return this.thresholds; }
   setThresholds(patch, user) {
-    const keys = ['CFG_WARN_TEMP', 'CFG_HIGH_TEMP', 'CFG_CRIT_TEMP', 'CFG_OFFLINE_SECONDS', 'CFG_LOW_BATTERY', 'CFG_RISE_RATE', 'CFG_LOG_INTERVAL_SECONDS'];
+    const keys = ['CFG_WARN_TEMP', 'CFG_HIGH_TEMP', 'CFG_CRIT_TEMP', 'CFG_OFFLINE_SECONDS', 'CFG_LOW_BATTERY', 'CFG_RISE_RATE', 'CFG_LOG_INTERVAL_SECONDS',
+      'CFG_VIB_WARN_RMS', 'CFG_VIB_CRIT_RMS', 'CFG_VIB_WARN_PEAK', 'CFG_VIB_CRIT_PEAK',
+      'CFG_BEARING_BASE', 'CFG_BEARING_LOAD_FACTOR', 'CFG_BEARING_SPEED_FACTOR'];
     for (const k of keys) if (patch[k] != null && Number.isFinite(Number(patch[k]))) this.thresholds[k] = Number(patch[k]);
     this.logAudit({ user, action: 'set_thresholds', detail: JSON.stringify(this.thresholds) });
     this._persist();

@@ -113,15 +113,15 @@ function createNotifier() {
   }
 
   async function sendTest(channel, to, store) {
-    if (channel === 'sms') return sendSMS(to, '[HIMNISH RAIP] Test SMS alert. System configured correctly.', store);
-    return sendEmail(to, 'HIMNISH RAIP test email', 'This is a test alert email from HIMNISH Loco Traction Motor Monitoring. Configuration OK.', store);
+    if (channel === 'sms') return sendSMS(to, '[LOCO TM CMS] Test SMS alert. System configured correctly.', store);
+    return sendEmail(to, 'LOCO TM CMS test email', 'This is a test alert email from LOCO TM CMS. Configuration OK.', store);
   }
 
   // Daily scheduled report: emails print/PDF links (valid 3 days) to recipients.
   async function sendReportEmail(baseUrl, token, emails, store) {
     const types = [['readings', 'Live Readings'], ['alarms', 'Alarm Report'],
       ['sensor-health', 'Sensor Health'], ['loco-health', 'Loco Health']];
-    let body = 'Loco Traction Motor Temperature Monitoring System\nDaily Report — ' + new Date().toLocaleDateString('en-GB') + '\n\n';
+    let body = 'LOCO TM CMS\nDaily Report — ' + new Date().toLocaleDateString('en-GB') + '\n\n';
     if (baseUrl) {
       body += 'Open any report below (links valid ~3 days, printable to PDF):\n\n';
       for (const [t, name] of types) body += `${name}: ${baseUrl}/api/v1/report/${t}/print?token=${token}\n`;

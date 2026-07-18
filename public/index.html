@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>LOCO Traction Motor Temperature Monitoring System</title>
+<title>LOCO TM CMS — Himnish Limited</title>
 <link rel="icon" type="image/png" href="/assets/himnish-logo.png" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -191,8 +191,8 @@
 <div id="login">
   <div class="login-card">
     <div style="text-align:center;margin-bottom:14px"><img src="/assets/himnish-logo.png" alt="Himnish Limited" style="height:96px;width:auto"/></div>
-    <div style="text-align:center"><h1 style="margin:0">HIMNISH LOCO TM</h1>
-    <div class="sub" style="margin:4px 0 20px">Temperature Monitoring System · Himnish Limited</div></div>
+    <div style="text-align:center"><h1 style="margin:0">LOCO TM CMS</h1>
+    <div class="sub" style="margin:4px 0 20px">Traction Motor Condition Monitoring System · Himnish Limited</div></div>
     <div class="field"><label>Username</label><input id="u" autocomplete="username" /></div>
     <div class="field"><label>Password</label><input id="p" type="password" autocomplete="current-password" /></div>
     <button class="btn" id="loginBtn">Sign in</button>
@@ -204,8 +204,8 @@
 <div id="app">
   <div class="topbar">
     <img src="/assets/himnish-logo.png" alt="Himnish" style="height:30px;width:auto"/>
-    <span class="title">HIMNISH LOCO <span style="color:var(--brand)">TM</span></span>
-    <span class="tag">LOCO · TM TEMP</span>
+    <span class="title">LOCO TM <span style="color:var(--brand)">CMS</span></span>
+    <span class="tag">LOCO TM CMS</span>
     <span id="demoBadge" style="display:none;font-family:var(--mono);font-size:11px;color:#fff;background:var(--warn);padding:2px 8px;border-radius:6px">DEMO MODE</span>
     <span class="spacer"></span>
     <span class="live"><span class="dot"></span><span id="clock">--:--:--</span></span>
@@ -360,6 +360,20 @@
           <div class="f"><label>Rapid rise ≥ °C/min</label><input class="inp" id="thRise" type="number" step="0.5" style="width:130px"></div>
           <div class="f"><label>Log data every (s)</label><input class="inp" id="thLog" type="number" style="width:120px"></div>
           <div class="f"><label>&nbsp;</label><button class="btn ghost" id="thSave">Save thresholds</button></div>
+        </div>
+      </div>
+
+      <div class="view-head"><h2 style="font-size:14px">Vibration &amp; Bearing Life (v7 IO-Link pipeline)</h2><span class="desc">Applies only to TMs reporting vib{} data · L10 model, carried over from LOCO-TM-CMS v7</span></div>
+      <div class="panel" style="padding:16px;margin-bottom:18px">
+        <div class="row" id="vibThRow">
+          <div class="f"><label>Vib Warning RMS</label><input class="inp" id="thVibWarnRms" type="number" step="0.1" style="width:110px"></div>
+          <div class="f"><label>Vib Critical RMS</label><input class="inp" id="thVibCritRms" type="number" step="0.1" style="width:110px"></div>
+          <div class="f"><label>Vib Warning Peak</label><input class="inp" id="thVibWarnPeak" type="number" step="0.1" style="width:110px"></div>
+          <div class="f"><label>Vib Critical Peak</label><input class="inp" id="thVibCritPeak" type="number" step="0.1" style="width:110px"></div>
+          <div class="f"><label>Bearing Base Life (hrs)</label><input class="inp" id="thBearingBase" type="number" style="width:130px"></div>
+          <div class="f"><label>Load Factor (Kl)</label><input class="inp" id="thBearingLoad" type="number" step="0.01" min="0.1" max="3.0" style="width:110px"></div>
+          <div class="f"><label>Speed Factor (Ks)</label><input class="inp" id="thBearingSpeed" type="number" step="0.01" min="0.1" max="3.0" style="width:110px"></div>
+          <div class="f"><label>&nbsp;</label><button class="btn ghost" id="vibThSave">Save vibration settings</button></div>
         </div>
       </div>
 
@@ -562,7 +576,7 @@
   <div id="wallboard" style="display:none;position:fixed;inset:0;background:var(--bg);z-index:60;padding:24px;overflow:auto">
     <div style="display:flex;align-items:center;gap:14px;margin-bottom:18px">
       <img src="/assets/himnish-logo.png" alt="Himnish" style="height:38px;width:auto"/>
-      <span style="font-weight:700;font-size:20px">HIMNISH LOCO TM · Control Room</span>
+      <span style="font-weight:700;font-size:20px">LOCO TM CMS · Control Room</span>
       <span class="live"><span class="dot"></span><span id="wallClock"></span></span>
       <span class="spacer" style="flex:1"></span>
       <span id="wallView" style="font-family:var(--mono);color:var(--muted);font-size:13px"></span>
@@ -1273,6 +1287,7 @@
   function bindAdminOnce(){
     if(_adminBound)return;_adminBound=true;
     $('#thSave').addEventListener('click',saveThresholds);
+    $('#vibThSave').addEventListener('click',saveVibThresholds);
     $('#addUserBtn').addEventListener('click',addUser);
     $('#addShedBtn').addEventListener('click',addShed);
     $('#addLocoBtn').addEventListener('click',addLoco);
@@ -1293,13 +1308,22 @@
   async function renderAdmin(){
     var ro=!isAdmin();
     $('#adminScopeNote').textContent=ro?'Read-only view — editing requires Super Admin':'Super Admin · full master-data control';
-    ['addUserBtn','addShedBtn','addLocoBtn','thSave','addDepotBtn','bulkBtn','addDeviceBtn'].forEach(function(id){$('#'+id).style.display=ro?'none':'';});
+    ['addUserBtn','addShedBtn','addLocoBtn','thSave','vibThSave','addDepotBtn','bulkBtn','addDeviceBtn'].forEach(function(id){$('#'+id).style.display=ro?'none':'';});
     // thresholds
     var th=await api('/thresholds');
     $('#thWarn').value=th.CFG_WARN_TEMP;$('#thHigh').value=th.CFG_HIGH_TEMP;$('#thCrit').value=th.CFG_CRIT_TEMP;
     $('#thOff').value=th.CFG_OFFLINE_SECONDS;$('#thBat').value=th.CFG_LOW_BATTERY;$('#thRise').value=th.CFG_RISE_RATE!=null?th.CFG_RISE_RATE:3;
     $('#thLog').value=th.CFG_LOG_INTERVAL_SECONDS!=null?th.CFG_LOG_INTERVAL_SECONDS:60;
     ['thWarn','thHigh','thCrit','thOff','thBat','thRise','thLog'].forEach(function(id){$('#'+id).disabled=ro;});
+    // vibration + bearing-life (v7 IO-Link pipeline)
+    $('#thVibWarnRms').value=th.CFG_VIB_WARN_RMS!=null?th.CFG_VIB_WARN_RMS:8.0;
+    $('#thVibCritRms').value=th.CFG_VIB_CRIT_RMS!=null?th.CFG_VIB_CRIT_RMS:10.0;
+    $('#thVibWarnPeak').value=th.CFG_VIB_WARN_PEAK!=null?th.CFG_VIB_WARN_PEAK:12.0;
+    $('#thVibCritPeak').value=th.CFG_VIB_CRIT_PEAK!=null?th.CFG_VIB_CRIT_PEAK:16.0;
+    $('#thBearingBase').value=th.CFG_BEARING_BASE!=null?th.CFG_BEARING_BASE:50000;
+    $('#thBearingLoad').value=th.CFG_BEARING_LOAD_FACTOR!=null?th.CFG_BEARING_LOAD_FACTOR:1.0;
+    $('#thBearingSpeed').value=th.CFG_BEARING_SPEED_FACTOR!=null?th.CFG_BEARING_SPEED_FACTOR:1.0;
+    ['thVibWarnRms','thVibCritRms','thVibWarnPeak','thVibCritPeak','thBearingBase','thBearingLoad','thBearingSpeed'].forEach(function(id){$('#'+id).disabled=ro;});
     // users
     var users=await api('/users');var tu=$('#adminUsers');tu.innerHTML='';
     var GLOBAL_ROLES=['super_admin','railway_hq'];
@@ -1437,6 +1461,13 @@
     var body={CFG_WARN_TEMP:+$('#thWarn').value,CFG_HIGH_TEMP:+$('#thHigh').value,CFG_CRIT_TEMP:+$('#thCrit').value,
       CFG_OFFLINE_SECONDS:+$('#thOff').value,CFG_LOW_BATTERY:+$('#thBat').value,CFG_RISE_RATE:+$('#thRise').value,CFG_LOG_INTERVAL_SECONDS:+$('#thLog').value};
     try{await api('/thresholds',{method:'PUT',body:JSON.stringify(body)});$('#thSave').textContent='Saved ✓';setTimeout(function(){$('#thSave').textContent='Save thresholds';},1500);}
+    catch(e){alert(e.message);}
+  }
+  async function saveVibThresholds(){
+    var body={CFG_VIB_WARN_RMS:+$('#thVibWarnRms').value,CFG_VIB_CRIT_RMS:+$('#thVibCritRms').value,
+      CFG_VIB_WARN_PEAK:+$('#thVibWarnPeak').value,CFG_VIB_CRIT_PEAK:+$('#thVibCritPeak').value,
+      CFG_BEARING_BASE:+$('#thBearingBase').value,CFG_BEARING_LOAD_FACTOR:+$('#thBearingLoad').value,CFG_BEARING_SPEED_FACTOR:+$('#thBearingSpeed').value};
+    try{await api('/thresholds',{method:'PUT',body:JSON.stringify(body)});VIB_TH={warn:body.CFG_VIB_WARN_RMS,crit:body.CFG_VIB_CRIT_RMS};$('#vibThSave').textContent='Saved ✓';setTimeout(function(){$('#vibThSave').textContent='Save vibration settings';},1500);}
     catch(e){alert(e.message);}
   }
   function addUser(){
