@@ -80,8 +80,10 @@ function apiRouter(store, notifier) {
     }
     // 2) Configured locos that are NOT reporting — shown as OFFLINE so an
     //    operator can see which locos have a problem (not just the healthy ones).
-    const TM_LABELS = ['TM1-DE', 'TM1-NDE', 'TM2-DE', 'TM2-NDE', 'TM3-DE', 'TM3-NDE',
-      'TM4-DE', 'TM4-NDE', 'TM5-DE', 'TM5-NDE', 'TM6-DE', 'TM6-NDE'];
+    // Real hardware topology: 6 traction motors, ONE triaxial sensor per TM
+    // (temp + XYZ vibration) — TM1..TM6, no DE/NDE split. Only the physically
+    // wired TMs will ever report; the rest just show OFFLINE until wired.
+    const TM_LABELS = ['TM1', 'TM2', 'TM3', 'TM4', 'TM5', 'TM6'];
     for (const [loco_id, asg] of store.assignment) {
       if (!asg || !asg.shed_id) continue;
       if (!store.canSeeLoco(req.user, loco_id)) continue;
@@ -90,6 +92,7 @@ function apiRouter(store, notifier) {
       const tms = TM_LABELS.map((label) => ({
         sensor_id: `${loco_id}_${label}`, tm_id: label, temperature: null, status: 'offline',
         classification: 'offline', battery_health: null, signal_strength: null, last_update: null,
+        vib: null, io_link_status: null, sensor_type: null,
       }));
       shed.locos.set(loco_id, { loco_id, since: asg.since || null, tms });
     }
