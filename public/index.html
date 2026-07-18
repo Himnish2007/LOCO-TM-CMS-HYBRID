@@ -782,7 +782,8 @@
       '</svg>';
     var card=el('div','gaugecard '+cls);
     var head=el('div','gc-head');
-    var left=el('div');left.appendChild(el('div','gc-tm',tmLabel));left.appendChild(el('div','gc-side',sideLabel+' Side'));
+    var left=el('div');left.appendChild(el('div','gc-tm',tmLabel));
+    if(sideLabel)left.appendChild(el('div','gc-side',sideLabel+' Side'));
     head.appendChild(left);
     head.appendChild(el('span','gc-badge '+cls,GAUGE_BADGE[cls]||'OFFLINE'));
     card.appendChild(head);
@@ -807,6 +808,36 @@
     }
     if(t)card.addEventListener('click',function(){openTrend(t.sensor_id);});
     return card;
+  }
+
+  // Builds a tmgrid of gauge cards from a loco's tms[] array. Handles BOTH
+  // real topologies seen in this fleet:
+  //  - v7 vibration pipeline (actual hardware): ONE triaxial sensor per TM,
+  //    tm_id is plain "TM1".."TM6" — no DE/NDE split. Rendered as one card
+  //    per TM (up to 6; only the physically-wired ones report, e.g. 3 today).
+  //  - Legacy temp-only Modbus pipeline: TWO points per TM (bearing DE + NDE),
+  //    tm_id is "TM1-DE"/"TM1-NDE" — rendered as a DE/NDE pair per TM, as before.
+  function buildTmGrid(tms){
+    var tmg=el('div','tmgrid');
+    var byTm={};
+    (tms||[]).forEach(function(t){
+      var parts=String(t.tm_id||'').split('-');var num=parts[0]||t.tm_id;var side=(parts[1]||'').toUpperCase();
+      if(!byTm[num])byTm[num]={sides:{},plain:null};
+      if(side)byTm[num].sides[side]=t; else byTm[num].plain=t;
+    });
+    var nums=Object.keys(byTm).sort(function(a,b){return (parseInt(a.replace(/\D/g,''),10)||0)-(parseInt(b.replace(/\D/g,''),10)||0);});
+    nums.forEach(function(num){
+      var entry=byTm[num];
+      if(entry.plain||(!entry.sides.DE&&!entry.sides.NDE)){
+        // Single-sensor TM (real hardware topology) — one card, no side label.
+        tmg.appendChild(tmGaugeCard(entry.plain,'TM '+num.replace('TM',''),''));
+      }else{
+        ['DE','NDE'].forEach(function(side){
+          tmg.appendChild(tmGaugeCard(entry.sides[side],'TM '+num.replace('TM',''),side));
+        });
+      }
+    });
+    return tmg;
   }
   async function renderLive(){
     var sheds=await api('/sheds');var wrap=$('#sheds');
@@ -849,19 +880,7 @@
           cc.style.borderColor='var(--off)';
         }
         cc.appendChild(ch);
-        var tmg=el('div','tmgrid');
-        var byTm={};
-        c.tms.forEach(function(t){
-          var parts=String(t.tm_id||'').split('-');var num=parts[0]||t.tm_id;var side=(parts[1]||'').toUpperCase();
-          if(!byTm[num])byTm[num]={};
-          byTm[num][side]=t;
-        });
-        var nums=Object.keys(byTm).sort(function(a,b){return (parseInt(a.replace(/\D/g,''),10)||0)-(parseInt(b.replace(/\D/g,''),10)||0);});
-        ['DE','NDE'].forEach(function(side){
-          nums.forEach(function(num){
-            tmg.appendChild(tmGaugeCard(byTm[num][side],'TM '+num.replace('TM',''),side));
-          });
-        });
+        var tmg=buildTmGrid(c.tms);
         cc.appendChild(tmg);consist.appendChild(cc);
       });
       card.appendChild(consist);wrap.appendChild(card);
@@ -880,19 +899,7 @@
     if(!e){t.appendChild(el('div','empty','No shed selected'));return;}
     e.locos.forEach(function(c){
       var car=el('div','car');var ch=el('div','ch');ch.appendChild(el('span','cid',c.loco_id));car.appendChild(ch);
-      var tmg=el('div','tmgrid');
-      var byTm={};
-      c.tms.forEach(function(tm){
-        var parts=String(tm.tm_id||'').split('-');var num=parts[0]||tm.tm_id;var side=(parts[1]||'').toUpperCase();
-        if(!byTm[num])byTm[num]={};
-        byTm[num][side]=tm;
-      });
-      var nums=Object.keys(byTm).sort(function(a,b){return (parseInt(a.replace(/\D/g,''),10)||0)-(parseInt(b.replace(/\D/g,''),10)||0);});
-      ['DE','NDE'].forEach(function(side){
-        nums.forEach(function(num){
-          tmg.appendChild(tmGaugeCard(byTm[num][side],'TM '+num.replace('TM',''),side));
-        });
-      });
+      var tmg=buildTmGrid(c.tms);
       car.appendChild(tmg);
       t.appendChild(car);
     });
@@ -928,7 +935,16 @@
 
   async function renderHeatmap(){
     var sheds=await api('/sheds');var hm=$('#heatmap');hm.innerHTML='';
-    var HM_LABELS=['TM1-DE','TM1-NDE','TM2-DE','TM2-NDE','TM3-DE','TM3-NDE','TM4-DE','TM4-NDE','TM5-DE','TM5-NDE','TM6-DE','TM6-NDE'];
+    // Column set is derived from whatever TMs actually exist in the fleet —
+    // works for both the single-sensor-per-TM hardware (TM1..TM6) and the
+    // legacy DE/NDE-paired pipeline (TM1-DE, TM1-NDE, ...), fleet-wide.
+    var labelSet={};
+    sheds.forEach(function(e){e.locos.forEach(function(c){c.tms.forEach(function(t){labelSet[t.tm_id]=1;});});});
+    var HM_LABELS=Object.keys(labelSet).sort(function(a,b){
+      var na=parseInt(String(a).replace(/\D/g,''),10)||0,nb=parseInt(String(b).replace(/\D/g,''),10)||0;
+      if(na!==nb)return na-nb; return String(a).localeCompare(String(b));
+    });
+    if(!HM_LABELS.length)HM_LABELS=['TM1','TM2','TM3','TM4','TM5','TM6'];
     var head=el('div','hm-row');head.appendChild(el('div','hm-head',''));HM_LABELS.forEach(function(h){head.appendChild(el('div','hm-head',h.replace('TM','')));});hm.appendChild(head);
     var rows=[];
     sheds.forEach(function(e){e.locos.forEach(function(c){
