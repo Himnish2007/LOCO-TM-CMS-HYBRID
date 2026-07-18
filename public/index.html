@@ -760,6 +760,57 @@
     return dropdownVal?String(dropdownVal).toLowerCase():'';
   }
 
+  // ---- Keyed DOM reconciliation ------------------------------------------
+  // Live views re-render every 5s, but the underlying temperature/vibration
+  // values fluctuate constantly, so a naive "diff the whole HTML, replace if
+  // different" check almost always triggers a full teardown+rebuild — visible
+  // as a page-wide flicker. These helpers instead compare DIRECT CHILDREN by
+  // a stable key attribute (data-shed / data-loco / data-sid): if the same
+  // set of keys is present in the same order, only the LEAF nodes whose
+  // content actually changed get patched in place; everything else (borders,
+  // scroll position, unrelated cards) is left completely untouched. A full
+  // replace only happens at the level where the key set itself changed
+  // (a loco/TM was added or removed) — a rare event, not every poll.
+  function reconcileChildren(oldParent,newParent,keyAttr,onMatch){
+    var oldKids=Array.prototype.slice.call(oldParent.children);
+    var newKids=Array.prototype.slice.call(newParent.children);
+    var oldKeys=oldKids.map(function(e){return e.getAttribute(keyAttr);}).join('|');
+    var newKeys=newKids.map(function(e){return e.getAttribute(keyAttr);}).join('|');
+    if(oldKeys!==newKeys||!oldKeys){ oldParent.innerHTML=newParent.innerHTML; return; }
+    for(var i=0;i<oldKids.length;i++) onMatch(oldKids[i],newKids[i]);
+  }
+  function reconcileLeafCard(oldCard,newCard){
+    if(oldCard.innerHTML!==newCard.innerHTML)oldCard.innerHTML=newCard.innerHTML;
+    if(oldCard.className!==newCard.className)oldCard.className=newCard.className;
+  }
+  // Patches the Live SHED tree: sheds -> .consist(locos) -> .tmgrid(cards).
+  function reconcileLive(oldWrap,newWrap){
+    reconcileChildren(oldWrap,newWrap,'data-shed',function(oldShed,newShed){
+      var oh=oldShed.querySelector(':scope > .shed-head'),nh=newShed.querySelector(':scope > .shed-head');
+      if(oh&&nh&&oh.innerHTML!==nh.innerHTML)oh.innerHTML=nh.innerHTML;
+      var oc=oldShed.querySelector(':scope > .consist'),nc=newShed.querySelector(':scope > .consist');
+      if(!oc||!nc)return;
+      reconcileChildren(oc,nc,'data-loco',function(oldLoco,newLoco){
+        var ohh=oldLoco.querySelector(':scope > .loco-head'),nhh=newLoco.querySelector(':scope > .loco-head');
+        if(ohh&&nhh&&ohh.innerHTML!==nhh.innerHTML)ohh.innerHTML=nhh.innerHTML;
+        if(oldLoco.getAttribute('style')!==newLoco.getAttribute('style'))oldLoco.setAttribute('style',newLoco.getAttribute('style')||'');
+        var og=oldLoco.querySelector(':scope > .tmgrid'),ng=newLoco.querySelector(':scope > .tmgrid');
+        if(!og||!ng)return;
+        reconcileChildren(og,ng,'data-sid',reconcileLeafCard);
+      });
+    });
+  }
+  // Patches the Digital Twin tree: cars(locos) -> .tmgrid(cards).
+  function reconcileTwin(oldWrap,newWrap){
+    reconcileChildren(oldWrap,newWrap,'data-loco',function(oldCar,newCar){
+      var oh=oldCar.querySelector(':scope > .ch'),nh=newCar.querySelector(':scope > .ch');
+      if(oh&&nh&&oh.innerHTML!==nh.innerHTML)oh.innerHTML=nh.innerHTML;
+      var og=oldCar.querySelector(':scope > .tmgrid'),ng=newCar.querySelector(':scope > .tmgrid');
+      if(!og||!ng)return;
+      reconcileChildren(og,ng,'data-sid',reconcileLeafCard);
+    });
+  }
+
   async function renderOverview(){
     var k=await api('/overview');
     var cards=[['Total Sheds',k.total_sheds,'','accent'],['Locomotives',k.total_locos,'',''],['Traction Motors',k.total_tms,'',''],
@@ -808,6 +859,7 @@
       '<circle cx="'+cx+'" cy="'+cy+'" r="7" style="fill:var(--text)"/>'+
       '</svg>';
     var card=el('div','gaugecard '+cls);
+    card.setAttribute('data-sid',t?t.sensor_id:('x:'+tmLabel+':'+sideLabel));
     var head=el('div','gc-head');
     var left=el('div');left.appendChild(el('div','gc-tm',tmLabel));
     if(sideLabel)left.appendChild(el('div','gc-side',sideLabel+' Side'));
@@ -896,14 +948,14 @@
     var wrap=document.createElement('div');
     if(!sheds.length){wrap.appendChild(el('div','empty','Waiting for sensor data…'));$('#liveCount').textContent='';if(liveWrap.innerHTML!==wrap.innerHTML)liveWrap.innerHTML=wrap.innerHTML;return;}
     sheds.forEach(function(e){
-      var card=el('div','shed');var head=el('div','shed-head');
+      var card=el('div','shed');card.setAttribute('data-shed',e.shed_id);var head=el('div','shed-head');
       head.appendChild(el('span','name',e.name));
       head.appendChild(el('span','meta','· '+e.locos.length+(e.locos.length===1?' loco':' locos')+' · '+e.locos.reduce(function(a,c){return a+c.tms.length;},0)+' TMs'));
       if(e._rank>=2){var b=el('span','sev '+(e._rank>=4?'critical':e._rank>=3?'high':'warning'),'NEEDS ATTENTION');b.style.marginLeft='6px';head.appendChild(b);}
       card.appendChild(head);var consist=el('div','consist');
       e.locos.forEach(function(c){
         var cr=locoRank(c);if(cr>=2)alarmC++;
-        var cc=el('div','loco');if(cr>=2){cc.style.borderColor='var(--'+(cr>=4?'crit':cr>=3?'high':'warn')+')';cc.style.boxShadow='0 0 0 1px var(--'+(cr>=4?'crit':cr>=3?'high':'warn')+')';}
+        var cc=el('div','loco');cc.setAttribute('data-loco',c.loco_id);if(cr>=2){cc.style.borderColor='var(--'+(cr>=4?'crit':cr>=3?'high':'warn')+')';cc.style.boxShadow='0 0 0 1px var(--'+(cr>=4?'crit':cr>=3?'high':'warn')+')';}
         var ch=el('div','loco-head');ch.appendChild(el('span','cid',c.loco_id));
         var allOff=c.tms.every(function(t){return t.status==='offline';});
         if(allOff){
@@ -919,7 +971,8 @@
       card.appendChild(consist);wrap.appendChild(card);
     });
     $('#liveCount').textContent=alarmC?(alarmC+' loco(es) above threshold — shown first'):(totC+' loco(es) · all normal');
-    if(liveWrap.innerHTML!==wrap.innerHTML)liveWrap.innerHTML=wrap.innerHTML;
+    if(!liveWrap.children.length||liveWrap.querySelector('.empty')){liveWrap.innerHTML=wrap.innerHTML;}
+    else{reconcileLive(liveWrap,wrap);}
   }
 
   async function renderTwin(){
@@ -929,14 +982,17 @@
     sel.onchange=function(){drawTwin(sheds);};drawTwin(sheds);
   }
   function drawTwin(sheds){
-    var id=$('#twinPick').value;var e=sheds.find(function(x){return x.shed_id===id;});var t=$('#train');t.innerHTML='';
-    if(!e){t.appendChild(el('div','empty','No shed selected'));return;}
+    var id=$('#twinPick').value;var e=sheds.find(function(x){return x.shed_id===id;});var liveT=$('#train');
+    if(!e){liveT.innerHTML='';liveT.appendChild(el('div','empty','No shed selected'));return;}
+    var t=document.createElement('div');
     e.locos.forEach(function(c){
-      var car=el('div','car');var ch=el('div','ch');ch.appendChild(el('span','cid',c.loco_id));car.appendChild(ch);
+      var car=el('div','car');car.setAttribute('data-loco',c.loco_id);var ch=el('div','ch');ch.appendChild(el('span','cid',c.loco_id));car.appendChild(ch);
       var tmg=buildTmGrid(c.tms);
       car.appendChild(tmg);
       t.appendChild(car);
     });
+    if(!liveT.children.length||liveT.querySelector('.empty')){liveT.innerHTML=t.innerHTML;}
+    else{reconcileTwin(liveT,t);}
   }
 
   async function renderVibration(){

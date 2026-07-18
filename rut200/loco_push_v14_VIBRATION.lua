@@ -18,6 +18,7 @@ os.execute("mosquitto -d -c /etc/mosquitto/mosquitto.conf")
 os.execute("sleep 3")
 
 local socket = require("socket")
+io.stdout:setvbuf("line")
 
 local RAILWAY  = "https://loco-tm-cms-hybrid-production.up.railway.app/api/data/ingest"
 local API_KEY  = "himnish_data_key_2024"
