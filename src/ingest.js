@@ -144,6 +144,15 @@ function ingestRouter(store) {
     if (!store.locos.has(resolvedLocoId)) {
       store.upsertLoco({ loco_id: resolvedLocoId, name: locoIp ? `Loco @ ${locoIp}` : resolvedLocoId, rut200_ip: locoIp || null });
     }
+    // A loco with no shed assignment is invisible in Live/Digital Twin/Vibration
+    // views (they're shed-organized). The v7 hardware payload carries no
+    // shed_id, so auto-assign a default "Unassigned" shed on first contact —
+    // an admin can move it to the correct shed later from Admin → LOCO Transfer.
+    if (!store.assignment.has(resolvedLocoId)) {
+      const defaultShed = 'UNASSIGNED';
+      if (!store.sheds.has(defaultShed)) store.upsertShed({ shed_id: defaultShed, name: 'Unassigned (auto)' });
+      store.assignLoco({ loco_id: resolvedLocoId, shed_id: defaultShed, user: 'auto-provision', reason: 'first vibration-pipeline contact' });
+    }
 
     const ts = timestamp || new Date().toISOString();
     const accepted = [], errors = [];

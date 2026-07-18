@@ -75,6 +75,7 @@ function apiRouter(store, notifier) {
         sensor_id: s.sensor_id, tm_id: s.tm_id, temperature: s.temperature, status: s.status,
         classification: store.classify(s.status === 'offline' ? null : s.temperature),
         battery_health: s.battery_health, signal_strength: s.signal_strength, last_update: s.last_update,
+        vib: s.vib || null, io_link_status: s.io_link_status || null, sensor_type: s.sensor_type || null,
       });
     }
     // 2) Configured locos that are NOT reporting — shown as OFFLINE so an
@@ -398,6 +399,19 @@ function apiRouter(store, notifier) {
     const scoped = scopedSensors(req.user).some((x) => x.sensor_id === req.params.sensorId);
     if (!scoped) return res.status(403).json({ error: 'Not authorized for this sensor' });
     res.json(store.bearingLifePrediction(req.params.sensorId));
+  });
+
+  // Bulk list — every vibration-monitored TM (t.vib present) in scope, with
+  // its live reading + bearing-life prediction, for the Vibration Analysis view.
+  router.get('/bearing', (req, res) => {
+    const vibSensors = scopedSensors(req.user).filter((s) => s.vib);
+    const out = vibSensors.map((s) => ({
+      sensor_id: s.sensor_id, tm_id: s.tm_id, loco_id: s.loco_id, shed_id: s.shed_id,
+      status: s.status, io_link_status: s.io_link_status,
+      temperature: s.temperature, vib: s.vib,
+      ...store.bearingLifePrediction(s.sensor_id),
+    }));
+    res.json(out);
   });
 
   // ---- AI Copilot (LLM-ready; falls back to rule-based on the client) ----

@@ -126,6 +126,23 @@
   .gaugecard.high .gc-vals .gv-cur .gv-num{color:var(--high)}
   .gaugecard.critical .gc-vals .gv-cur .gv-num{color:var(--crit)}
   .gaugecard.offline .gc-vals .gv-cur .gv-num{color:var(--off)}
+  /* Vibration mini-panel (v7 IO-Link pipeline) — shown under the gauge only
+     for TMs that report vib{} data. */
+  .gc-vib{margin-top:6px;padding-top:6px;border-top:1px dashed var(--line);display:grid;grid-template-columns:1fr 1fr;gap:4px}
+  .gc-vib-item{background:var(--panel-2);border-radius:6px;padding:4px 6px;text-align:center}
+  .gc-vib-item .gv-num{font-family:var(--mono);font-weight:700;font-size:12px}
+  .gc-vib-item .gv-lbl{font-size:8px;color:var(--muted);text-transform:uppercase;letter-spacing:.03em}
+  .gc-vib-item.vib-warn .gv-num{color:var(--warn)}
+  .gc-vib-item.vib-crit .gv-num{color:var(--crit)}
+  .gc-vib-item.vib-ok .gv-num{color:var(--ok)}
+  .gc-disc{margin-top:6px;padding:5px;text-align:center;border-radius:6px;background:var(--off-bg);color:var(--off);font-size:10px;font-weight:700;letter-spacing:.03em}
+  /* Bearing life table (Vibration Analysis view) */
+  .bl-cond{font-size:10px;font-weight:700;padding:3px 9px;border-radius:20px;text-transform:uppercase;letter-spacing:.03em;white-space:nowrap}
+  .bl-cond.GOOD{background:var(--ok-bg);color:var(--ok)}
+  .bl-cond.MARGINAL{background:var(--warn-bg);color:var(--warn)}
+  .bl-cond.WARNING{background:var(--high-bg);color:var(--high)}
+  .bl-cond.CRITICAL{background:var(--crit-bg);color:var(--crit)}
+  .bl-cond.UNKNOWN{background:var(--off-bg);color:var(--off)}
 
   .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden;box-shadow:var(--shadow)}
   table{width:100%;border-collapse:collapse;font-size:13px}
@@ -204,6 +221,7 @@
     <button data-view="live">Live SHED</button>
     <button data-view="twin">Digital Twin</button>
     <button data-view="heatmap">Heatmap</button>
+    <button data-view="vibration">Vibration</button>
     <button data-view="map">Map</button>
     <button data-view="devices">Devices</button>
     <button data-view="topology">Topology</button>
@@ -251,6 +269,15 @@
       <div class="view-head"><h2>Live Temperature Heatmap</h2><span class="desc">Every TM across the fleet · hottest cells surface first</span></div>
       <div class="row" style="align-items:center"><span class="desc">Cooler</span><span class="scalebar"></span><span class="desc">Hotter</span></div>
       <div class="panel" style="padding:14px"><div class="hm" id="heatmap"></div></div>
+    </section>
+
+    <section class="view" id="view-vibration">
+      <div class="view-head"><h2>Vibration Analysis <span>&amp; Bearing Life</span></h2><span class="desc">L10 bearing-life prediction (ISO 281) · IO-Link vibration pipeline (RUT200 + BNI) · carried over from LOCO-TM-CMS v7</span></div>
+      <div class="kpis" id="vibKpis" style="margin-bottom:14px"></div>
+      <div class="panel" style="padding:0;overflow-x:auto"><table id="vibTable">
+        <thead><tr><th>LOCO</th><th>TM</th><th>Status</th><th>Temp</th><th>Vib RMS</th><th>Peak</th><th>Health Index</th><th>Condition</th><th>Est. Remaining Life</th><th>Recommendation</th></tr></thead>
+        <tbody id="vibTbody"></tbody>
+      </table></div>
     </section>
 
     <section class="view" id="view-devices">
@@ -669,6 +696,7 @@
       if(CURRENT==='live')return renderLive();
       if(CURRENT==='twin')return renderTwin();
       if(CURRENT==='heatmap')return renderHeatmap();
+      if(CURRENT==='vibration')return renderVibration();
       if(CURRENT==='map')return renderMap();
       if(CURRENT==='devices')return renderDevices();
       if(CURRENT==='topology')return renderTopology();
@@ -689,7 +717,7 @@
   // Auto-refresh poll (every 5s): only re-render LIVE data views so that
   // forms and charts (Admin, Notify, Analytics, Reports, Transfer, Maintenance)
   // are never interrupted/reset while you use them.
-  var LIVE_VIEWS={overview:1,live:1,twin:1,heatmap:1,map:1,devices:1,topology:1,alerts:1,predict:1,health:1};
+  var LIVE_VIEWS={overview:1,live:1,twin:1,heatmap:1,vibration:1,map:1,devices:1,topology:1,alerts:1,predict:1,health:1};
   async function pollRefresh(){
     try{
       await updateBadge();
@@ -725,6 +753,7 @@
   // status badge, and Current/Warn/Alarm readout boxes underneath.
   var GAUGE_TH={warn:120,high:140,crit:160};
   var GAUGE_MAX=190; // crit + headroom; updated from live thresholds when available
+  var VIB_TH={warn:8.0,crit:10.0}; // vibration RMS thresholds, from v7 (updated from live config)
   var GAUGE_BADGE={normal:'NORMAL',warning:'WARNING',high:'HIGH',critical:'CRITICAL',offline:'OFFLINE'};
   function gaugeArcPoint(cx,cy,r,frac){
     var ang=(180-frac*180)*Math.PI/180;
@@ -764,12 +793,25 @@
     var alarm=el('div','gv-alarm');alarm.appendChild(el('div','gv-num',GAUGE_TH.crit+'°'));alarm.appendChild(el('div','gv-lbl','Alarm'));
     vals.appendChild(cur);vals.appendChild(warn);vals.appendChild(alarm);
     card.appendChild(vals);
+    // Vibration mini-panel — only for TMs on the v7 IO-Link pipeline (t.vib present).
+    if(t&&t.io_link_status==='DISCONNECTED'){
+      card.appendChild(el('div','gc-disc','⚠ SENSOR DISCONNECTED'));
+    }else if(t&&t.vib&&t.vib.rms!=null){
+      var vrms=t.vib.rms,vpeak=t.vib.peak;
+      var vcls=vrms>=VIB_TH.crit?'vib-crit':vrms>=VIB_TH.warn?'vib-warn':'vib-ok';
+      var vp=el('div','gc-vib');
+      var vr=el('div','gc-vib-item '+vcls);vr.appendChild(el('div','gv-num',vrms.toFixed(2)));vr.appendChild(el('div','gv-lbl','RMS'));
+      var vk=el('div','gc-vib-item');vk.appendChild(el('div','gv-num',(vpeak==null?'—':vpeak.toFixed(2))));vk.appendChild(el('div','gv-lbl','Peak'));
+      vp.appendChild(vr);vp.appendChild(vk);
+      card.appendChild(vp);
+    }
     if(t)card.addEventListener('click',function(){openTrend(t.sensor_id);});
     return card;
   }
   async function renderLive(){
     var sheds=await api('/sheds');var wrap=$('#sheds');
-    try{var th=await api('/thresholds');if(th&&th.CFG_CRIT_TEMP){GAUGE_TH={warn:th.CFG_WARN_TEMP,high:th.CFG_HIGH_TEMP,crit:th.CFG_CRIT_TEMP};GAUGE_MAX=th.CFG_CRIT_TEMP+30;}}catch(e){}
+    try{var th=await api('/thresholds');if(th&&th.CFG_CRIT_TEMP){GAUGE_TH={warn:th.CFG_WARN_TEMP,high:th.CFG_HIGH_TEMP,crit:th.CFG_CRIT_TEMP};GAUGE_MAX=th.CFG_CRIT_TEMP+30;}
+      if(th&&th.CFG_VIB_CRIT_RMS){VIB_TH={warn:th.CFG_VIB_WARN_RMS,crit:th.CFG_VIB_CRIT_RMS};}}catch(e){}
     // populate loco dropdown (assigned locos only)
     var allLocos=[];sheds.forEach(function(e){e.locos.forEach(function(c){allLocos.push(c.loco_id);});});
     var sel=$('#liveLocoPick');var keep=sel.value;
@@ -853,6 +895,34 @@
       });
       car.appendChild(tmg);
       t.appendChild(car);
+    });
+  }
+
+  async function renderVibration(){
+    var rows=await api('/bearing');
+    var crit=rows.filter(function(r){return r.condition==='CRITICAL';}).length;
+    var warn=rows.filter(function(r){return r.condition==='WARNING'||r.condition==='MARGINAL';}).length;
+    var cards=[['Vibration-Monitored TMs',rows.length,'',''],['Critical',crit,'',crit?'crit':''],
+      ['Warning / Marginal',warn,'',warn?'warn':''],['Healthy',rows.length-crit-warn,'','ok']];
+    var kw=$('#vibKpis');kw.innerHTML='';
+    cards.forEach(function(c){var d=el('div','kpi '+(c[3]||''));d.appendChild(el('div','label',c[0]));var v=el('div','val'+(c[2]?' unit':''),c[1]);if(c[2])v.dataset.unit=c[2];d.appendChild(v);kw.appendChild(d);});
+    var tb=$('#vibTbody');tb.innerHTML='';
+    if(!rows.length){var tr=el('tr');var td=el('td',null,'No vibration-monitored TMs yet — waiting for the RUT200 IO-Link pipeline to report.');td.colSpan=10;td.style.textAlign='center';td.style.padding='24px';td.style.color='var(--muted)';tr.appendChild(td);tb.appendChild(tr);return;}
+    rows.sort(function(a,b){var order={CRITICAL:0,WARNING:1,MARGINAL:2,GOOD:3,UNKNOWN:4};return (order[a.condition]||9)-(order[b.condition]||9);});
+    rows.forEach(function(r){
+      var tr=el('tr');
+      tr.appendChild(el('td',null,r.loco_id));
+      tr.appendChild(el('td',null,r.tm_id||r.sensor_id));
+      var stat=r.io_link_status==='DISCONNECTED'?'DISCONNECTED':(r.status||'—');
+      tr.appendChild(el('td',null,stat));
+      tr.appendChild(el('td',null,r.temperature==null?'—':r.temperature.toFixed(1)+'°C'));
+      tr.appendChild(el('td',null,r.avgVibRms==null?'—':r.avgVibRms));
+      tr.appendChild(el('td',null,r.maxVibPeak==null?'—':r.maxVibPeak));
+      tr.appendChild(el('td',null,r.healthIndex==null?'—':r.healthIndex));
+      var condTd=el('td');var badge=el('span','bl-cond '+(r.condition||'UNKNOWN'),r.condition||'UNKNOWN');condTd.appendChild(badge);tr.appendChild(condTd);
+      tr.appendChild(el('td',null,r.estimatedRemainingLife==null?'—':r.estimatedRemainingLife.toLocaleString()+' hrs'));
+      tr.appendChild(el('td',null,r.recommendation||r.message||'—'));
+      tb.appendChild(tr);
     });
   }
 
