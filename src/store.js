@@ -887,12 +887,13 @@ class Store {
   }
 
   // Least-squares slope (deg C per minute) over the last n valid samples.
-  _slope(buf, n) {
-    const pts = (buf || []).filter((p) => p.temperature != null).slice(-n);
+  _slope(buf, n, field) {
+    field = field || 'temperature';
+    const pts = (buf || []).filter((p) => p[field] != null).slice(-n);
     if (pts.length < 3) return null;
     const t0 = Date.parse(pts[0].t);
     const xs = pts.map((p) => (Date.parse(p.t) - t0) / 60000);
-    const ys = pts.map((p) => p.temperature);
+    const ys = pts.map((p) => p[field]);
     const m = xs.length;
     const sx = xs.reduce((a, b) => a + b, 0), sy = ys.reduce((a, b) => a + b, 0);
     const sxx = xs.reduce((a, b) => a + b * b, 0), sxy = xs.reduce((a, b, i) => a + xs[i] * ys[i], 0);
@@ -956,27 +957,50 @@ class Store {
   }
 
   // Predictive projection: rate of rise + estimated minutes to critical.
+  // Early-warning prediction — combines TWO independent signals when both are
+  // available: temperature rise-rate (all sensors) and vibration RMS trend
+  // (v7 IO-Link pipeline only). A TM can be flagged from either signal —
+  // e.g. vibration climbing toward critical while temperature is still normal
+  // is a genuine early bearing-wear warning that temperature alone would miss.
   computePredictions(sensors) {
     const t = this.getThresholds();
     const out = [];
     for (const s of sensors) {
-      if (s.status === 'offline' || s.temperature == null) continue;
-      const slope = this._slope(this.series.get(s.sensor_id) || [], 8);
-      if (slope == null) continue;
-      const rate = +slope.toFixed(2);
-      let mins_to_crit = null;
-      if (rate > 0.1 && s.temperature < t.CFG_CRIT_TEMP) {
-        mins_to_crit = +((t.CFG_CRIT_TEMP - s.temperature) / rate).toFixed(1);
+      if (s.status === 'offline') continue;
+      const buf = this.series.get(s.sensor_id) || [];
+      let rate = null, mins_to_crit = null, risk = 'stable';
+      if (s.temperature != null) {
+        const slope = this._slope(buf, 8, 'temperature');
+        if (slope != null) {
+          rate = +slope.toFixed(2);
+          if (rate > 0.1 && s.temperature < t.CFG_CRIT_TEMP) mins_to_crit = +((t.CFG_CRIT_TEMP - s.temperature) / rate).toFixed(1);
+          if (rate >= t.CFG_RISE_RATE) risk = 'rising';
+          if (mins_to_crit != null && mins_to_crit <= 60) risk = 'watch';
+          if (mins_to_crit != null && mins_to_crit <= 15) risk = 'urgent';
+          if (rate < -0.2) risk = 'cooling';
+        }
       }
-      let risk = 'stable';
-      if (rate >= t.CFG_RISE_RATE) risk = 'rising';
-      if (mins_to_crit != null && mins_to_crit <= 60) risk = 'watch';
-      if (mins_to_crit != null && mins_to_crit <= 15) risk = 'urgent';
-      if (rate < -0.2) risk = 'cooling';
+      let vib_rate = null, vib_mins_to_crit = null, vib_risk = 'stable';
+      if (s.vib && s.vib.rms != null) {
+        const vslope = this._slope(buf, 8, 'vib_rms');
+        if (vslope != null) {
+          vib_rate = +vslope.toFixed(4);
+          if (vib_rate > 0.001 && s.vib.rms < t.CFG_VIB_CRIT_RMS) vib_mins_to_crit = +((t.CFG_VIB_CRIT_RMS - s.vib.rms) / vib_rate).toFixed(1);
+          if (s.vib.rms >= t.CFG_VIB_WARN_RMS || vib_rate > 0.01) vib_risk = 'rising';
+          if (vib_mins_to_crit != null && vib_mins_to_crit <= 60) vib_risk = 'watch';
+          if (vib_mins_to_crit != null && vib_mins_to_crit <= 15) vib_risk = 'urgent';
+        }
+      }
+      if (rate == null && vib_rate == null) continue; // neither signal has enough history yet
+      const rank = { stable: 0, cooling: 0, rising: 1, watch: 2, urgent: 3 };
+      const combined = (rank[vib_risk] || 0) > (rank[risk] || 0) ? vib_risk : risk;
+      const combinedMins = [mins_to_crit, vib_mins_to_crit].filter((x) => x != null).sort((a, b) => a - b)[0] ?? null;
       out.push({ sensor_id: s.sensor_id, tm_id: s.tm_id, loco_id: s.loco_id, shed_id: s.shed_id,
-        temperature: s.temperature, rate, mins_to_crit, risk });
+        temperature: s.temperature, rate, mins_to_crit,
+        vib_rms: s.vib ? s.vib.rms : null, vib_rate, vib_mins_to_crit,
+        risk: combined, mins_to_crit_combined: combinedMins });
     }
-    out.sort((a, b) => (a.mins_to_crit == null ? 1e9 : a.mins_to_crit) - (b.mins_to_crit == null ? 1e9 : b.mins_to_crit));
+    out.sort((a, b) => (a.mins_to_crit_combined == null ? 1e9 : a.mins_to_crit_combined) - (b.mins_to_crit_combined == null ? 1e9 : b.mins_to_crit_combined));
     return out;
   }
 }

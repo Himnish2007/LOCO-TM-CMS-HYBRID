@@ -207,6 +207,7 @@
     <span class="title">LOCO TM <span style="color:var(--brand)">CMS</span></span>
     <span class="tag">LOCO TM CMS</span>
     <span id="demoBadge" style="display:none;font-family:var(--mono);font-size:11px;color:#fff;background:var(--warn);padding:2px 8px;border-radius:6px">DEMO MODE</span>
+    <span id="dbWarnBadge" title="Locos/sheds/users will be lost on the next deploy — add a Postgres database and set DATABASE_URL" style="display:none;font-family:var(--mono);font-size:11px;color:#fff;background:var(--crit);padding:2px 8px;border-radius:6px;cursor:help">⚠ NOT SAVING PERMANENTLY</span>
     <span class="spacer"></span>
     <span class="live"><span class="dot"></span><span id="clock">--:--:--</span></span>
     <button class="iconbtn" id="themeBtn" title="Toggle theme">🌙</button>
@@ -248,6 +249,7 @@
       <div class="view-head"><h2>Live LOCO Monitoring</h2><span class="desc">Over-threshold locos float to the top · click a TM for its trend</span></div>
       <div class="row"><div class="f"><label>Show motor loco</label>
         <select id="liveLocoPick"><option value="">All assigned locos</option></select></div>
+        <div class="f"><label>Search LOCO</label><input class="inp" id="liveLocoSearch" type="text" placeholder="Type loco no…" style="width:160px"></div>
         <div class="f"><label>&nbsp;</label><span class="desc" id="liveCount"></span></div></div>
       <div class="legend">
         <span><i class="swatch" style="background:var(--ok)"></i>Normal</span>
@@ -318,10 +320,10 @@
     </section>
 
     <section class="view" id="view-predict">
-      <div class="view-head"><h2>Predictive Early-Warning</h2><span class="desc">Rate of temperature rise &amp; projected time-to-critical · soonest first</span></div>
+      <div class="view-head"><h2>Predictive Early-Warning</h2><span class="desc">Temperature rise-rate + vibration trend (v7 IO-Link) · soonest-to-critical first</span></div>
       <div class="kpis" id="predStats" style="margin-bottom:18px"></div>
       <div class="panel"><table>
-        <thead><tr><th>TM</th><th>LOCO</th><th>Shed</th><th>Temp</th><th>Rise Rate</th><th>Est. time to Critical</th><th>Risk</th></tr></thead>
+        <thead><tr><th>TM</th><th>LOCO</th><th>Shed</th><th>Temp</th><th>Temp Rate</th><th>Vib RMS</th><th>Vib Rate</th><th>Est. time to Critical</th><th>Risk</th></tr></thead>
         <tbody id="predRows"></tbody></table><div class="empty" id="predEmpty" style="display:none">Not enough data yet — projections need a few readings per sensor.</div></div>
 
       <div class="view-head" style="margin-top:22px"><h2 style="font-size:14px">Prognostics</h2><span class="desc">Thermal-degradation trend (statistical, from observed data)</span></div>
@@ -545,7 +547,8 @@
 
     <section class="view" id="view-topology">
       <div class="view-head"><h2>Network Topology</h2><span class="desc">Sensor → Data Concentrator → LTE Gateway → Cloud · per motor loco</span></div>
-      <div class="row"><div class="f"><label>LOCO</label><select id="topoPick"></select></div></div>
+      <div class="row"><div class="f"><label>LOCO</label><select id="topoPick"></select></div>
+        <div class="f"><label>Search LOCO</label><input class="inp" id="topoLocoSearch" type="text" placeholder="Type loco no…" style="width:160px"></div></div>
       <div class="panel" style="padding:18px"><div id="topo"></div></div>
     </section>
 
@@ -636,7 +639,8 @@
       document.querySelector('.nav button[data-view="notify"]').style.display=canAdmin?'':'none';
       document.querySelector('.nav button[data-view="audit"]').style.display=canAdmin?'':'none';
       bindAdminOnce();
-      fetch('/healthz').then(function(r){return r.json();}).then(function(h){$('#demoBadge').style.display=h.demo?'':'none';}).catch(function(){});
+      fetch('/healthz').then(function(r){return r.json();}).then(function(h){$('#demoBadge').style.display=h.demo?'':'none';
+        var showDbWarn=!h.db_connected&&USER&&USER.role==='super_admin';$('#dbWarnBadge').style.display=showDbWarn?'':'none';}).catch(function(){});
       startClock();switchView('overview');startPolling();startIdleTimer();
     }catch(err){$('#loginErr').textContent=err.message;}
   }
@@ -746,6 +750,15 @@
   }
 
   function cls(t){return t==null?'offline':(t>90?'critical':t>80?'high':t>70?'warning':'normal');}
+  // Combines a free-text search box with a dropdown selector: search text (if
+  // any) takes priority and does a substring match; otherwise falls back to
+  // the dropdown's exact selection. Used on pages with large fleets where a
+  // plain dropdown doesn't scale.
+  function liveSearchFilter(inputEl,dropdownVal){
+    var q=(inputEl&&inputEl.value||'').trim().toLowerCase();
+    if(q)return q;
+    return dropdownVal?String(dropdownVal).toLowerCase():'';
+  }
 
   async function renderOverview(){
     var k=await api('/overview');
@@ -854,7 +867,7 @@
     return tmg;
   }
   async function renderLive(){
-    var sheds=await api('/sheds');var wrap=$('#sheds');
+    var sheds=await api('/sheds');var liveWrap=$('#sheds');
     try{var th=await api('/thresholds');if(th&&th.CFG_CRIT_TEMP){GAUGE_TH={warn:th.CFG_WARN_TEMP,high:th.CFG_HIGH_TEMP,crit:th.CFG_CRIT_TEMP};GAUGE_MAX=th.CFG_CRIT_TEMP+30;}
       if(th&&th.CFG_VIB_CRIT_RMS){VIB_TH={warn:th.CFG_VIB_WARN_RMS,crit:th.CFG_VIB_CRIT_RMS};}}catch(e){}
     // populate loco dropdown (assigned locos only)
@@ -864,18 +877,24 @@
     allLocos.sort().forEach(function(cid){var o=el('option',null,cid);o.value=cid;sel.appendChild(o);});
     if(keep&&allLocos.indexOf(keep)>=0)sel.value=keep;
     sel.onchange=renderLive;
-    var filter=sel.value;
+    var srch=$('#liveLocoSearch');
+    if(!srch._wired){srch._wired=true;srch.addEventListener('input',function(){clearTimeout(srch._t);srch._t=setTimeout(renderLive,250);});}
+    var filter=liveSearchFilter(srch,sel.value);
     // filter + sort: over-threshold locos first, SHEDS by worst severity
     sheds.forEach(function(e){
-      e.locos=e.locos.filter(function(c){return !filter||c.loco_id===filter;});
+      e.locos=e.locos.filter(function(c){return !filter||c.loco_id.toLowerCase().indexOf(filter)>=0;});
       e.locos.sort(function(a,b){return locoRank(b)-locoRank(a);});
       e._rank=e.locos.reduce(function(m,c){return Math.max(m,locoRank(c));},0);
     });
     sheds=sheds.filter(function(e){return e.locos.length;});
     sheds.sort(function(a,b){return b._rank-a._rank;});
     var totC=allLocos.length;var alarmC=0;
-    wrap.innerHTML='';
-    if(!sheds.length){wrap.appendChild(el('div','empty','Waiting for sensor data…'));$('#liveCount').textContent='';return;}
+    // Build into a DETACHED container first — only touch the live DOM if the
+    // rendered content actually changed. Prevents the visible flicker/blank
+    // flash that a full innerHTML='' + rebuild causes on every 5s poll when
+    // nothing meaningful has changed.
+    var wrap=document.createElement('div');
+    if(!sheds.length){wrap.appendChild(el('div','empty','Waiting for sensor data…'));$('#liveCount').textContent='';if(liveWrap.innerHTML!==wrap.innerHTML)liveWrap.innerHTML=wrap.innerHTML;return;}
     sheds.forEach(function(e){
       var card=el('div','shed');var head=el('div','shed-head');
       head.appendChild(el('span','name',e.name));
@@ -900,6 +919,7 @@
       card.appendChild(consist);wrap.appendChild(card);
     });
     $('#liveCount').textContent=alarmC?(alarmC+' loco(es) above threshold — shown first'):(totC+' loco(es) · all normal');
+    if(liveWrap.innerHTML!==wrap.innerHTML)liveWrap.innerHTML=wrap.innerHTML;
   }
 
   async function renderTwin(){
@@ -1025,8 +1045,12 @@
     var d=await api('/devices');var sheds=await api('/sheds');
     var locos=[];sheds.forEach(function(e){e.locos.forEach(function(c){locos.push({loco_id:c.loco_id,shed_id:e.shed_id,tms:c.tms});});});
     var sel=$('#topoPick');var keep=sel.value;sel.innerHTML='';
-    locos.forEach(function(c){var o=el('option',null,c.shed_id+' · '+c.loco_id);o.value=c.loco_id;sel.appendChild(o);});
-    if(keep&&locos.some(function(c){return c.loco_id===keep;}))sel.value=keep;
+    var tsrch=$('#topoLocoSearch');
+    if(!tsrch._wired){tsrch._wired=true;tsrch.addEventListener('input',function(){clearTimeout(tsrch._t);tsrch._t=setTimeout(renderTopology,250);});}
+    var q=(tsrch.value||'').trim().toLowerCase();
+    var visible=q?locos.filter(function(c){return c.loco_id.toLowerCase().indexOf(q)>=0;}):locos;
+    visible.forEach(function(c){var o=el('option',null,c.shed_id+' · '+c.loco_id);o.value=c.loco_id;sel.appendChild(o);});
+    if(keep&&visible.some(function(c){return c.loco_id===keep;}))sel.value=keep;
     sel.onchange=renderTopology;
     var cid=sel.value;var loco=locos.find(function(c){return c.loco_id===cid;});
     var dc=d.concentrators.find(function(x){return x.loco_id===cid;})||{};
@@ -1142,9 +1166,12 @@
     shown.forEach(function(p){
       var tr=el('tr');
       tr.appendChild(el('td',null,p.tm_id||p.sensor_id));tr.appendChild(el('td',null,p.loco_id||'—'));tr.appendChild(el('td',null,p.shed_id||'—'));
-      tr.appendChild(el('td',null,p.temperature.toFixed(1)+'°C'));
-      tr.appendChild(el('td',null,(p.rate>0?'+':'')+p.rate+' °C/min'));
-      tr.appendChild(el('td',null,p.mins_to_crit==null?'—':(p.mins_to_crit<=0?'now':'~'+p.mins_to_crit+' min')));
+      tr.appendChild(el('td',null,p.temperature==null?'—':p.temperature.toFixed(1)+'°C'));
+      tr.appendChild(el('td',null,p.rate==null?'—':((p.rate>0?'+':'')+p.rate+' °C/min')));
+      tr.appendChild(el('td',null,p.vib_rms==null?'—':p.vib_rms.toFixed(3)));
+      tr.appendChild(el('td',null,p.vib_rate==null?'—':((p.vib_rate>0?'+':'')+p.vib_rate+'/min')));
+      var mtc=p.mins_to_crit_combined!=null?p.mins_to_crit_combined:p.mins_to_crit;
+      tr.appendChild(el('td',null,mtc==null?'—':(mtc<=0?'now':'~'+mtc+' min')));
       var rc=el('td');var cl=riskColor[p.risk]||'ok';var sp=el('span','sev',p.risk);
       sp.style.background='var(--'+cl+'-bg)';sp.style.color='var(--'+cl+')';rc.appendChild(sp);tr.appendChild(rc);
       tb.appendChild(tr);

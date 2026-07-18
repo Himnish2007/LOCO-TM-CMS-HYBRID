@@ -24,9 +24,13 @@ async function bootstrap() {
       const db = createDb(config.DATABASE_URL);
       await db.init();
       store.attachDb(db);
+      console.log('[db] PostgreSQL connected — locos/sheds/users/thresholds will survive redeploys.');
     } catch (e) {
       console.error('[db] init failed — continuing on in-memory + JSON:', e.message);
+      console.error('[db] WARNING: without a working DATABASE_URL, all locos/sheds/config will be LOST on the next deploy (Railway\'s filesystem is not persistent by default).');
     }
+  } else {
+    console.warn('[db] WARNING: DATABASE_URL is not set. Locos/sheds/users/thresholds are ONLY on local disk and will be LOST on the next Railway deploy. Add a Postgres database and set DATABASE_URL to fix this permanently.');
   }
   await store.load();               // restore master data (DB preferred, else JSON)
   if (store.db) await store.backfillFromDb(config.BACKFILL_HOURS); // restore live + trends
@@ -145,7 +149,7 @@ app.use('/api/v1', apiLimiter, apiRouter(store, notifier)); // dashboard API (ra
 // the versioned dashboard API above.
 app.use('/api', ingestRouter(store));
 
-app.get('/healthz', (req, res) => res.json({ ok: true, demo: config.DEMO_MODE }));
+app.get('/healthz', (req, res) => res.json({ ok: true, demo: config.DEMO_MODE, db_connected: !!store.db }));
 app.get('/docs', (req, res) => res.sendFile(path.join(__dirname, 'public', 'docs.html')));
 
 // Unknown API paths get a JSON 404, not the SPA HTML.
