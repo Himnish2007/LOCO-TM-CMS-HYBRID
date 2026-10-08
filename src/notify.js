@@ -32,7 +32,7 @@ function createNotifier() {
     return {
       severity: (alert.severity || '').toUpperCase(), message: alert.message || '',
       loco: alert.loco_id || '', shed: alert.shed_id || '', tm: alert.tm_id || alert.sensor_id || '',
-      temp: alert.value != null ? alert.value : '', time: new Date(alert.at || Date.now()).toLocaleString('en-GB'),
+      temp: alert.value != null ? alert.value : '', time: new Date(alert.at || Date.now()).toLocaleString('en-GB', { timeZone: 'Asia/Kolkata' }) + ' IST',
     };
   }
 
@@ -49,15 +49,75 @@ function createNotifier() {
     return rec;
   }
 
-  async function sendSMS(to, message, store) {
+  // ---- DLT SMS content: which approved template + which variable values --------------------------
+  // Values go into {#var#} slots. DLT rule: each variable <= 30 characters; Fast2SMS separates them with "|".
+  const dlt = {
+    clean: (v, max) => String(v == null ? '' : v).replace(/[|<>\r\n]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max || 30),
+    shortTime(at) { // "28/09 17:40" in IST
+      const p = {}; new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Kolkata', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
+        .formatToParts(new Date(at || Date.now())).forEach((x) => { p[x.type] = x.value; });
+      return `${p.day}/${p.month} ${p.hour}:${p.minute}`;
+    },
+    build(alert, escalated) {
+      const sev = String(alert.severity || '');
+      const loco = dlt.clean(alert.loco_id || alert.sensor_id, 30), when = dlt.shortTime(alert.at);
+      if (sev === 'offline') {
+        const list = String(alert.tm_id || '').split(',').map((x) => x.trim()).filter(Boolean);
+        let sensors = list.join(',');
+        if (!sensors || sensors.length > 30) sensors = list.length ? `${list.length} sensors` : 'sensors';
+        return { kind: 'OFFLINE', vars: [loco, sensors, when] };
+      }
+      if (sev === 'low_battery') {
+        return { kind: 'BATT', vars: [loco, dlt.clean(alert.tm_id || alert.sensor_id, 30), alert.value != null ? Math.round(alert.value) : '?'] };
+      }
+      const label = (escalated ? 'ESCALATED ' : '') + sev.replace(/_/g, ' ').toUpperCase();
+      const temp = alert.value != null && Number.isFinite(Number(alert.value)) ? Number(alert.value).toFixed(1) : '?';
+      return { kind: 'TEMP', vars: [dlt.clean(label, 30), loco, dlt.clean(alert.tm_id || alert.sensor_id, 30), temp, when] };
+    },
+  };
+  const dltTemplateFor = (kind) => ({ TEMP: config.SMS_DLT_TPL_TEMP, OFFLINE: config.SMS_DLT_TPL_OFFLINE, BATT: config.SMS_DLT_TPL_BATT }[kind] || '');
+
+  // Read the provider's own answer: an HTTP 200 alone does NOT mean the SMS was accepted
+  // (wrong key, empty wallet, unapproved template ... all come back as {"return":false,...}).
+  async function readProviderReply(res, rec) {
+    let body = null, raw = '';
+    try { raw = await res.text(); body = JSON.parse(raw); } catch (e) { /* not JSON */ }
+    if (body && typeof body === 'object' && 'return' in body) {
+      rec.ok = res.ok && body.return === true;
+      const msg = Array.isArray(body.message) ? body.message.join('; ') : (body.message || '');
+      if (rec.ok) { if (body.request_id) rec.note = 'accepted by Fast2SMS, request ' + body.request_id; }
+      else rec.error = String(msg || ('provider refused (HTTP ' + res.status + ')')).slice(0, 200);
+      return;
+    }
+    rec.ok = res.ok;
+    if (!res.ok) rec.error = 'HTTP ' + res.status + (raw ? ': ' + raw.slice(0, 120) : '');
+  }
+
+  async function sendSMS(to, message, store, payload) {
     const rec = { channel: 'sms', to, at: new Date().toISOString(), message };
     const provider = (config.SMS_PROVIDER || 'log').toLowerCase();
     try {
       if (provider === 'log' || !config.SMS_API_KEY) { rec.ok = true; rec.note = 'dry-run (SMS provider not configured)'; }
+      else if (provider === 'fast2sms_dlt') {
+        // India DLT route: an approved template's ID + the variable values (no free text allowed)
+        const kind = payload && payload.kind, tpl = dltTemplateFor(kind);
+        if (!config.SMS_SENDER) { rec.ok = false; rec.error = 'SMS_SENDER (DLT header, 6 letters) is not set'; }
+        else if (!tpl) { rec.ok = false; rec.error = `no DLT template configured for "${kind}" alerts (set SMS_DLT_TPL_${kind})`; }
+        else {
+          rec.message = `[DLT ${kind} template ${tpl}] ` + (message || '');
+          const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 8000);
+          const res = await fetch(config.SMS_API_BASE + '/dev/bulkV2', {
+            method: 'POST', signal: ctrl.signal,
+            headers: { authorization: config.SMS_API_KEY, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ route: 'dlt', sender_id: config.SMS_SENDER, message: String(tpl), variables_values: payload.vars.map((v) => dlt.clean(v)).join('|'), numbers: String(to).replace(/\D/g, '').slice(-10), flash: 0 }),
+          });
+          clearTimeout(t); await readProviderReply(res, rec);
+        }
+      }
       else {
         let url;
         if (provider === 'fast2sms') {
-          url = `https://www.fast2sms.com/dev/bulkV2?authorization=${config.SMS_API_KEY}&route=q&message=${encodeURIComponent(message)}&numbers=${encodeURIComponent(to)}`;
+          url = `${config.SMS_API_BASE}/dev/bulkV2?authorization=${config.SMS_API_KEY}&route=q&message=${encodeURIComponent(message)}&numbers=${encodeURIComponent(to)}`;
         } else if (provider === 'msg91') {
           url = `https://api.msg91.com/api/sendhttp.php?authkey=${config.SMS_API_KEY}&mobiles=${encodeURIComponent(to)}&message=${encodeURIComponent(message)}&sender=${config.SMS_SENDER || 'HMNISH'}&route=4&country=91`;
         } else { // generic: SMS_URL template with {to} {message} {key}
@@ -65,7 +125,7 @@ function createNotifier() {
         }
         const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 8000);
         const res = await fetch(url, { signal: ctrl.signal }); clearTimeout(t);
-        rec.ok = res.ok; if (!res.ok) rec.error = 'HTTP ' + res.status;
+        await readProviderReply(res, rec);
       }
     } catch (e) { rec.ok = false; rec.error = e.message; }
     if (store) store.addNotification(rec);
@@ -73,19 +133,65 @@ function createNotifier() {
   }
 
   // Dispatch one alert through its configured rule.
-  async function dispatchForAlert(alert, store) {
+  async function dispatchForAlert(alert, store, opts) {
+    opts = opts || {};
     const cfg = store.getAlertConfig();
     const rule = cfg.rules[alert.severity];
     if (!rule) return;
     const ctx = ctxFor(alert);
     const subject = fill(cfg.templates.email_subject, ctx);
     const body = fill(cfg.templates.email_body, ctx);
-    const sms = fill(cfg.templates.sms, ctx);
-    const channels = rule.channels || [];
+    // Offline alerts have no temperature, so the temperature SMS template would read
+    // "OFFLINE: TM.. on 128298 = C". Use a message-based text instead (still ONE sms per recipient).
+    const sms = alert.severity === 'offline'
+      ? fill(cfg.templates.sms_offline || '[LOCO-TM ALERT] {severity}: {message} @ {time}', ctx)
+      : fill(cfg.templates.sms, ctx);
+    // After the 30-min "genuinely still offline" confirmation in sweepOffline(), an offline alert is
+    // sent on whatever channels the admin configured for it (email and/or SMS), same as any other
+    // severity — no special-case blocking. The confirmation window itself is what prevents a brief
+    // signal drop or power blip from ever reaching here at all. SMS fires only on this FIRST,
+    // confirmed-genuine dispatch though: the hourly "still offline" reminder (opts.isReminder, from
+    // the timer in server.js) is email-only, so a prolonged outage costs one SMS, not one every hour.
+    const channels = (rule.channels || []).filter((c) => !(c === 'sms' && alert.severity === 'offline' && opts.isReminder));
+    const dltPayload = dlt.build(alert, false);
+    // SMS costs money and a sensor that stays hot re-raises its alert every minute: send the same
+    // recipient / loco / severity again only after SMS_REPEAT_MIN minutes (0 = always send).
+    const smsLast = dispatchForAlert.smsLast || (dispatchForAlert.smsLast = new Map());
+    // Forget entries older than the repeat window: without this the map grows for as long as the
+    // server runs (every distinct severity+loco+number combo ever alerted stays in memory forever).
+    if (!dispatchForAlert._smsGcAt || Date.now() - dispatchForAlert._smsGcAt > 3600000) {
+      dispatchForAlert._smsGcAt = Date.now();
+      const maxAge = Math.max((Number(config.SMS_REPEAT_MIN) || 0) * 60000, 3600000) * 2;
+      for (const [k, t] of smsLast) if (Date.now() - t > maxAge) smsLast.delete(k);
+    }
+    const smsSend = async (to) => {
+      const every = (Number(config.SMS_REPEAT_MIN) || 0) * 60000;
+      const key = `${alert.severity}|${alert.loco_id || alert.sensor_id}|${to}`;
+      const last = smsLast.get(key) || 0;
+      if (every && Date.now() - last < every) {
+        console.log(`[sms] not repeated to ${to} (${key.split('|').slice(0, 2).join(' ')}): last SMS ${Math.round((Date.now() - last) / 60000)} min ago, limit ${config.SMS_REPEAT_MIN} min`);
+        return;
+      }
+      const rec = await sendSMS(to, sms, store, dltPayload);
+      if (rec.ok) smsLast.set(key, Date.now());
+    };
+
+    // Safety net (the _raise() dedup above should already stop a sustained fault from re-notifying,
+    // but this catches any edge case — e.g. a manual re-trigger) so one address is not emailed again
+    // for the same loco+severity within EMAIL_REPEAT_MIN minutes (0 = always send).
+    const emailLast = dispatchForAlert.emailLast || (dispatchForAlert.emailLast = new Map());
+    const emailSend = async (to) => {
+      const every = (alert.severity === 'offline' ? (Number(config.OFFLINE_EMAIL_REMINDER_MIN) || 0) : (Number(config.EMAIL_REPEAT_MIN) || 0)) * 60000;
+      const ekey = `${alert.severity}|${alert.loco_id || alert.sensor_id}|${to}`;
+      const last = emailLast.get(ekey) || 0;
+      if (every && Date.now() - last < every) { console.log(`[email] not repeated to ${to} (${ekey.split('|').slice(0, 2).join(' ')}): last sent ${Math.round((Date.now() - last) / 60000)} min ago, limit ${config.EMAIL_REPEAT_MIN} min`); return; }
+      const rec = await sendEmail(to, subject, body, store);
+      if (rec.ok) emailLast.set(ekey, Date.now());
+    };
 
     // 1) Control-room recipients configured on the rule (see everything).
-    if (channels.includes('email')) for (const to of (rule.emails || [])) await sendEmail(to, subject, body, store);
-    if (channels.includes('sms')) for (const to of (rule.phones || [])) await sendSMS(to, sms, store);
+    if (channels.includes('email')) for (const to of (rule.emails || [])) await emailSend(to);
+    if (channels.includes('sms')) for (const to of (rule.phones || [])) await smsSend(to);
 
     // 2) Assigned users — each user is notified ONLY for locos/SHEDS assigned
     //    to them (global-role users get everything). Uses each user's own
@@ -94,8 +200,8 @@ function createNotifier() {
       const sentEmail = new Set(rule.emails || []);
       const sentSms = new Set(rule.phones || []);
       for (const u of store.usersForLoco(alert.loco_id)) {
-        if (channels.includes('email') && u.email && !sentEmail.has(u.email)) { await sendEmail(u.email, subject, body, store); sentEmail.add(u.email); }
-        if (channels.includes('sms') && u.phone && !sentSms.has(u.phone)) { await sendSMS(u.phone, sms, store); sentSms.add(u.phone); }
+        if (channels.includes('email') && u.email && !sentEmail.has(u.email)) { await emailSend(u.email); sentEmail.add(u.email); }
+        if (channels.includes('sms') && u.phone && !sentSms.has(u.phone)) { await smsSend(u.phone); sentSms.add(u.phone); }
       }
     }
   }
@@ -107,13 +213,23 @@ function createNotifier() {
     const cfg = store.getAlertConfig();
     const subject = '[ESCALATION] ' + fill(cfg.templates.email_subject, ctx);
     const body = 'ESCALATED (' + (tier.name || '') + ')\n' + fill(cfg.templates.email_body, ctx);
-    const sms = 'ESCALATED: ' + fill(cfg.templates.sms, ctx);
     for (const to of (tier.emails || [])) await sendEmail(to, subject, body, store);
-    for (const to of (tier.phones || [])) await sendSMS(to, sms, store);
+    // Offline uses its own message-based SMS text (no temperature value to show), same as the main
+    // dispatch path above — not blocked: after the 30-min confirmation window, escalation SMS is
+    // allowed for offline exactly like any other severity.
+    const sms = 'ESCALATED: ' + (alert.severity === 'offline'
+      ? fill(cfg.templates.sms_offline || '[LOCO-TM ALERT] {severity}: {message} @ {time}', ctx)
+      : fill(cfg.templates.sms, ctx));
+    const escPayload = dlt.build(alert, true);
+    for (const to of (tier.phones || [])) await sendSMS(to, sms, store, escPayload);
   }
 
   async function sendTest(channel, to, store) {
-    if (channel === 'sms') return sendSMS(to, '[LOCO TM CMS] Test SMS alert. System configured correctly.', store);
+    if (channel === 'sms') {
+      // On the DLT route a test must also use an approved template: send a clearly marked TEMP-template test.
+      const test = { kind: 'TEMP', vars: ['TEST', 'TEST', 'TM1', '0.0', dlt.shortTime()] };
+      return sendSMS(to, '[LOCO TM CMS] Test SMS alert. System configured correctly.', store, test);
+    }
     return sendEmail(to, 'LOCO TM CMS test email', 'This is a test alert email from LOCO TM CMS. Configuration OK.', store);
   }
 

@@ -1,12 +1,21 @@
 'use strict';
 
 const ExcelJS = require('exceljs');
+const PDFDocument = require('pdfkit');
 
 // ---------------------------------------------------------------------------
 // Report generation: real .xlsx (ExcelJS) + printable HTML (browser -> PDF).
 // All reports operate on the caller's SCOPED sensor list, so a user only ever
 // exports their assigned locos (tender: export per assigned asset).
 // ---------------------------------------------------------------------------
+
+// The server runs in UTC (Etc/UTC), but reports are read by India-based rail
+// staff — always render report timestamps in IST regardless of the host's
+// own system timezone, so they match what the reader expects.
+function ist(d) {
+  return (d instanceof Date ? d : new Date(d))
+    .toLocaleString('en-GB', { timeZone: 'Asia/Kolkata' });
+}
 
 const TYPES = {
   readings: 'Live Readings Report',
@@ -79,9 +88,22 @@ function healthIndex(store, sensors, scope) {
     const temps = arr.filter((s) => s.temperature != null && s.status !== 'offline').map((s) => s.temperature);
     const avg = temps.length ? +(temps.reduce((a, b) => a + b, 0) / temps.length).toFixed(1) : null;
     const worst = rankName[Math.max.apply(null, arr.map((s) => rank[store.classify(s.status === 'offline' ? null : s.temperature)] || 0))];
-    const score = Math.round(arr.reduce((a, s) => a + s.score, 0) / arr.length);
+    // Communication health (item 25): a loco whose radio link is poor (weak signal, packet loss)
+    // is a real operational risk even while temperatures look fine — readings could be stale or
+    // about to stop entirely. This is a SECONDARY factor: capped so it can never outweigh temperature,
+    // which remains the primary safety signal the score is built on.
+    const sigVals = arr.filter((s) => s.signal_strength != null).map((s) => s.signal_strength);
+    const avgSignal = sigVals.length ? Math.round(sigVals.reduce((a, b) => a + b, 0) / sigVals.length) : null;
+    const cm = store.comm.get(loco_id);
+    let commPenalty = 0;
+    if (avgSignal != null && avgSignal < 50) commPenalty += Math.min(10, Math.round((50 - avgSignal) / 5));
+    if (cm && cm.packet_loss != null) commPenalty += Math.min(15, Math.round(cm.packet_loss));
+    commPenalty = Math.min(20, commPenalty);
+    const baseScore = Math.round(arr.reduce((a, s) => a + s.score, 0) / arr.length);
+    const score = Math.max(0, baseScore - commPenalty);
     if (shed_id) { if (!byShed.has(shed_id)) byShed.set(shed_id, []); byShed.get(shed_id).push({ score, avg, count: arr.length }); }
-    return { loco_id, shed_id, count: arr.length, avg_temp: avg, worst, score };
+    return { loco_id, shed_id, count: arr.length, avg_temp: avg, worst, score,
+      comm_avg_signal: avgSignal, comm_packet_loss: cm ? cm.packet_loss : null, comm_penalty: commPenalty };
   }).sort((a, b) => a.score - b.score);
   const sheds = [...byShed.entries()].map(([shed_id, arr]) => {
     const score = Math.round(arr.reduce((a, c) => a + c.score, 0) / arr.length);
@@ -94,6 +116,39 @@ function healthIndex(store, sensors, scope) {
   return { sensors: sensorsOut, locos, sheds, fleet };
 }
 
+// A simple, honest table PDF (title + generated-by line + the same rows as the Excel export). Uses
+// pdfkit (pure JS, no headless-browser/Chromium dependency) so it stays cheap to run on a small server.
+function toPdf(type, store, sensors, scope) {
+  const { head, body } = rowsFor(type, store, sensors, scope);
+  const doc = new PDFDocument({ margin: 36, size: 'A4', layout: head.length > 7 ? 'landscape' : 'portrait' });
+  const chunks = [];
+  doc.on('data', (c) => chunks.push(c));
+  const done = new Promise((resolve) => doc.on('end', () => resolve(Buffer.concat(chunks))));
+
+  doc.fontSize(14).font('Helvetica-Bold').text('LOCO TM CMS — Traction Motor Temperature Monitoring');
+  doc.fontSize(9).font('Helvetica-Oblique').text(`${TYPES[type] || 'Report'} — generated ${ist(new Date())}`);
+  doc.moveDown(0.6);
+
+  const pageW = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+  const colW = pageW / head.length;
+  const rowH = 16;
+  let y = doc.y;
+  const drawRow = (cells, opts = {}) => {
+    if (y + rowH > doc.page.height - doc.page.margins.bottom) { doc.addPage(); y = doc.page.margins.top; }
+    doc.font(opts.bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(8);
+    cells.forEach((c, i) => doc.text(String(c == null ? '' : c).slice(0, 40), doc.page.margins.left + i * colW, y, { width: colW - 4, height: rowH, ellipsis: true }));
+    if (opts.bold) doc.moveTo(doc.page.margins.left, y + rowH - 2).lineTo(doc.page.width - doc.page.margins.right, y + rowH - 2).lineWidth(0.5).stroke();
+    y += rowH;
+  };
+  drawRow(head, { bold: true });
+  for (const row of body) drawRow(row);
+  if (y + rowH > doc.page.height - doc.page.margins.bottom) { doc.addPage(); y = doc.page.margins.top; }
+  doc.fontSize(7).font('Helvetica-Oblique').text(`${body.length} row(s) — HIMNISH LIMITED`, doc.page.margins.left, y + 6, { lineBreak: false });
+
+  doc.end();
+  return done;
+}
+
 async function toXlsx(type, store, sensors, scope) {
   const wb = new ExcelJS.Workbook();
   wb.creator = 'HIMNISH Loco Traction Motor Monitoring';
@@ -101,7 +156,7 @@ async function toXlsx(type, store, sensors, scope) {
   ws.mergeCells('A1', 'E1');
   ws.getCell('A1').value = 'LOCO TM CMS';
   ws.getCell('A1').font = { bold: true, size: 14 };
-  ws.getCell('A2').value = (TYPES[type] || 'Report') + ' — generated ' + new Date().toLocaleString('en-GB');
+  ws.getCell('A2').value = (TYPES[type] || 'Report') + ' — generated ' + ist(new Date());
   ws.getCell('A2').font = { italic: true, size: 10 };
   const { head, body } = rowsFor(type, store, sensors, scope);
   const headerRow = ws.addRow([]);
@@ -125,14 +180,53 @@ th,td{border:1px solid #ccc;padding:6px 8px;text-align:left}th{background:#0e749
 tr:nth-child(even) td{background:#f4f7fa}.foot{margin-top:16px;font-size:11px;color:#777}
 @media print{.noprint{display:none}}</style></head><body>
 <h1>LOCO TM CMS</h1>
-<div class="sub">${esc(title)} · generated ${new Date().toLocaleString('en-GB')} · ${body.length} rows</div>
+<div class="sub">${esc(title)} · generated ${ist(new Date())} · ${body.length} rows</div>
 <button class="noprint" onclick="window.print()" style="margin-bottom:12px;padding:8px 14px;background:#0e7490;color:#fff;border:none;border-radius:6px;cursor:pointer">Print / Save as PDF</button>
 <table><thead><tr>${head.map((h) => '<th>' + esc(h) + '</th>').join('')}</tr></thead><tbody>${rows}</tbody></table>
 <div class="foot">HIMNISH LIMITED · Confidential · Railway asset monitoring report</div>
 <script>setTimeout(function(){window.print&&window.print();},400)</script></body></html>`;
 }
 
-module.exports = { TYPES, toXlsx, toHtml, healthIndex, buildHistory, toHistoryXlsx, toHistoryHtml };
+// ---- Reliability: MTBF (mean time between failures) and MTTR (mean time to repair) -------------
+// Built from store.alerts, which now persists across restarts (see store.js _snapshot). A "failure"
+// is any fault-type alert (temperature warning/high/critical, rapid rise, or offline) — low_battery
+// is excluded since a flat battery is routine maintenance, not an equipment fault. Needs at least 2
+// failures to compute an MTBF gap; MTTR needs at least 1 resolved/closed failure with a timestamp.
+const FAULT_SEVERITIES = ['warning', 'high', 'critical', 'rapid_rise', 'offline'];
+function reliability(store, scope, { days } = {}) {
+  const since = days ? Date.now() - days * 86400000 : 0;
+  const visible = (a) => (scope.all || (a.loco_id && scope.locos.has(a.loco_id))) && FAULT_SEVERITIES.includes(a.severity) && Date.parse(a.at) >= since;
+  const alerts = store.alerts.filter(visible);
+  const byLoco = new Map();
+  for (const a of alerts) { const k = a.loco_id || '(unassigned)'; if (!byLoco.has(k)) byLoco.set(k, []); byLoco.get(k).push(a); }
+
+  function statsFor(list) {
+    const sorted = list.slice().sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+    const failures = sorted.length;
+    let mtbf_hours = null;
+    if (failures >= 2) {
+      const gaps = [];
+      for (let i = 1; i < sorted.length; i++) gaps.push((Date.parse(sorted[i].at) - Date.parse(sorted[i - 1].at)) / 3600000);
+      mtbf_hours = +(gaps.reduce((a, b) => a + b, 0) / gaps.length).toFixed(1);
+    }
+    const resolved = sorted.filter((a) => a.resolved_at || a.closed_at);
+    let mttr_hours = null;
+    if (resolved.length) {
+      const durs = resolved.map((a) => (Date.parse(a.closed_at || a.resolved_at) - Date.parse(a.at)) / 3600000);
+      mttr_hours = +(durs.reduce((a, b) => a + b, 0) / durs.length).toFixed(2);
+    }
+    const stillOpen = failures - resolved.length;
+    return { failures, mtbf_hours, mttr_hours, resolved_count: resolved.length, still_open: stillOpen,
+      last_failure_at: sorted.length ? sorted[sorted.length - 1].at : null };
+  }
+
+  const locos = [...byLoco.entries()].map(([loco_id, list]) => Object.assign({ loco_id }, statsFor(list)))
+    .sort((a, b) => (a.mtbf_hours == null ? 1e9 : a.mtbf_hours) - (b.mtbf_hours == null ? 1e9 : b.mtbf_hours)); // worst (most frequent failures) first
+  const fleet = statsFor(alerts);
+  return { locos, fleet, window_days: days || null };
+}
+
+module.exports = { TYPES, toXlsx, toHtml, toPdf, healthIndex, buildHistory, toHistoryXlsx, toHistoryHtml, reliability };
 
 // ---- Historical (date-range, per-loco) reports ---------------------------
 function buildHistory(rows) {
@@ -164,8 +258,8 @@ async function toHistoryXlsx(loco, from, to, rows) {
   const info = wb.addWorksheet('Summary');
   info.getCell('A1').value = 'Loco TM — Historical Report';
   info.getCell('A1').font = { bold: true, size: 14 };
-  info.getCell('A2').value = `Loco: ${loco}    Period: ${from.toLocaleString('en-GB')} → ${to.toLocaleString('en-GB')}`;
-  info.getCell('A3').value = `Samples: ${table.length}    Generated: ${new Date().toLocaleString('en-GB')}`;
+  info.getCell('A2').value = `Loco: ${loco}    Period: ${ist(from)} → ${ist(to)}`;
+  info.getCell('A3').value = `Samples: ${table.length}    Generated: ${ist(new Date())}`;
   info.addRow([]);
   const sh = info.addRow(['Traction Motor', 'Samples', 'Min °C', 'Max °C', 'Avg °C']);
   sh.font = { bold: true, color: { argb: 'FFFFFFFF' } };
@@ -178,7 +272,7 @@ async function toHistoryXlsx(loco, from, to, rows) {
   const hr = ws.addRow(head);
   hr.font = { bold: true, color: { argb: 'FFFFFFFF' } };
   hr.eachCell((c) => { c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0E7490' } }; });
-  table.forEach((r) => ws.addRow([new Date(r.ts).toLocaleString('en-GB'), ...r.values.map((v) => (v == null ? '' : v))]));
+  table.forEach((r) => ws.addRow([ist(r.ts), ...r.values.map((v) => (v == null ? '' : v))]));
   ws.columns.forEach((col) => { col.width = 20; });
   return wb.xlsx.writeBuffer();
 }
@@ -186,14 +280,14 @@ async function toHistoryXlsx(loco, from, to, rows) {
 function toHistoryHtml(loco, from, to, rows) {
   const { tmCols, table, summary } = buildHistory(rows);
   const sumRows = summary.map((s) => `<tr><td>${esc(s.tm)}</td><td>${s.samples}</td><td>${s.min == null ? '—' : s.min}</td><td>${s.max == null ? '—' : s.max}</td><td>${s.avg == null ? '—' : s.avg}</td></tr>`).join('');
-  const dataRows = table.map((r) => `<tr><td>${esc(new Date(r.ts).toLocaleString('en-GB'))}</td>${r.values.map((v) => '<td>' + (v == null ? '—' : esc(v)) + '</td>').join('')}</tr>`).join('');
+  const dataRows = table.map((r) => `<tr><td>${esc(ist(r.ts))}</td>${r.values.map((v) => '<td>' + (v == null ? '—' : esc(v)) + '</td>').join('')}</tr>`).join('');
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Historical Report ${esc(loco)}</title>
 <style>body{font-family:Arial,sans-serif;margin:24px;color:#111}h1{font-size:18px;margin:0}
 .sub{color:#555;font-size:12px;margin:4px 0 16px}table{border-collapse:collapse;width:100%;font-size:12px;margin-bottom:20px}
 th,td{border:1px solid #ccc;padding:5px 8px;text-align:left}th{background:#0e7490;color:#fff}
 tr:nth-child(even) td{background:#f4f7fa}@media print{.noprint{display:none}}</style></head><body>
 <h1>Loco TM — Historical Report</h1>
-<div class="sub">Loco <b>${esc(loco)}</b> · ${esc(from.toLocaleString('en-GB'))} → ${esc(to.toLocaleString('en-GB'))} · ${table.length} samples · generated ${new Date().toLocaleString('en-GB')}</div>
+<div class="sub">Loco <b>${esc(loco)}</b> · ${esc(ist(from))} → ${esc(ist(to))} · ${table.length} samples · generated ${ist(new Date())}</div>
 <button class="noprint" onclick="window.print()" style="margin-bottom:12px;padding:8px 14px;background:#0e7490;color:#fff;border:none;border-radius:6px;cursor:pointer">Print / Save as PDF</button>
 <h3>Summary</h3><table><thead><tr><th>Traction Motor</th><th>Samples</th><th>Min °C</th><th>Max °C</th><th>Avg °C</th></tr></thead><tbody>${sumRows}</tbody></table>
 <h3>Readings</h3><table><thead><tr><th>Timestamp</th>${tmCols.map((c) => '<th>' + esc(c) + '</th>').join('')}</tr></thead><tbody>${dataRows}</tbody></table>

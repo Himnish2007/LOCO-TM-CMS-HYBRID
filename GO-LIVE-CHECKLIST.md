@@ -1,4 +1,4 @@
-# SHED Motor Loco TM Monitoring — Go-Live Checklist
+# LOCO TM CMS — Go-Live Checklist
 **HIMNISH LIMITED** · what YOU need to do on Railway to make the deployed system fully production-grade.
 The application code is complete and deployed. These are account/keys tasks only Claude cannot do for you.
 

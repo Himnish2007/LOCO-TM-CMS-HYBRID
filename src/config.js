@@ -21,16 +21,30 @@ const config = {
   // DATA_DIR to its mount path (e.g. /data) so users/SHEDS/locos survive
   // redeploys. Locally it defaults to ./data.
   DATA_DIR: process.env.DATA_DIR || path.join(__dirname, '..', 'data'),
+  // Automatic scheduled backups (item 19): a full master-data + alert-history snapshot is written
+  // to disk every BACKUP_INTERVAL_HOURS, kept for BACKUP_KEEP_DAYS, then deleted automatically.
+  // This is IN ADDITION TO, not instead of, RDS automated backups / aws_backup.sh.
+  BACKUP_DIR: process.env.BACKUP_DIR || '',   // '' = DATA_DIR/backups
+  BACKUP_INTERVAL_HOURS: Number(process.env.BACKUP_INTERVAL_HOURS) || 24,
+  BACKUP_KEEP_DAYS: Number(process.env.BACKUP_KEEP_DAYS) || 14,
+  // Sensor registry reminders (Admin -> Sensor Registry): how often calibration is expected, and
+  // how many days before a (parseable) warranty date to start flagging it as "expiring".
+  CALIBRATION_INTERVAL_DAYS: Number(process.env.CALIBRATION_INTERVAL_DAYS) || 365,
+  WARRANTY_WARN_DAYS: Number(process.env.WARRANTY_WARN_DAYS) || 60,
 
   // Optional PostgreSQL/TimescaleDB archive. When set, every reading is stored
   // durably and history survives restarts. Unset = in-memory + JSON only.
   DATABASE_URL: process.env.DATABASE_URL || '',
+  // Optional: forward field-device traffic (device-config + ingest) to a
+  // different backend. Only set this on a deployment acting as a relay for
+  // devices still pointed at its old URL — leave unset everywhere else.
+  RELAY_TARGET: process.env.RELAY_TARGET || '',
   BACKFILL_HOURS: num('BACKFILL_HOURS', 6),
   // Data retention: purge readings older than N days (0 = keep forever).
   RETENTION_DAYS: num('RETENTION_DAYS', 0),
 
   JWT_SECRET: process.env.JWT_SECRET || 'himnish-raip-loco-dev-secret-change-me',
-  JWT_TTL: process.env.JWT_TTL || '12h',
+  JWT_TTL: process.env.JWT_TTL || '8h',
 
   // Ingestion key used by the generic /api/ingest route (readings[] batch format).
   DATA_API_KEY: process.env.DATA_API_KEY || 'himnish_loco_key_2026',
@@ -40,6 +54,13 @@ const config = {
   PUSH_API_KEY: process.env.PUSH_API_KEY || 'himnish_rut200_key_2024',
   // Shared key a field RUT uses to pull its own config (self-update).
   BOOTSTRAP_KEY: process.env.BOOTSTRAP_KEY || 'himnish_bootstrap_2025',
+  // API docs (/docs, /openapi.json): hidden entirely unless both are set (see requireDocsAuth in server.js).
+  DOCS_USER: process.env.DOCS_USER || '',
+  DOCS_PASSWORD: process.env.DOCS_PASSWORD || '',
+  // Once every field device has migrated off the shared DATA_API_KEY/BOOTSTRAP_KEY to its own
+  // per-device key (see device.api_key in the field-device registry), set this to true so the
+  // server refuses the old shared keys instead of just warning about them.
+  STRICT_SECURITY: String(process.env.STRICT_SECURITY || 'false').toLowerCase() === 'true',
 
   // Dedicated key for the LIVE, hardware-connected LOCO-TM-CMS v7 ingest path
   // (POST /api/data/ingest, header x-api-key). This is the proven RUT200 +
@@ -60,8 +81,21 @@ const config = {
   CFG_HIGH_TEMP: num('CFG_HIGH_TEMP', 140),
   CFG_CRIT_TEMP: num('CFG_CRIT_TEMP', 160),
   CFG_OFFLINE_SECONDS: num('CFG_OFFLINE_SECONDS', 300),
+  // How long a loco must STAY offline before an alert (email/SMS) is actually sent — separate from
+  // and longer than CFG_OFFLINE_SECONDS above (which only controls the dashboard's online/offline
+  // status, shown instantly). A brief signal drop or power blip that recovers within this window
+  // never generates an alert at all — only a genuinely sustained outage does.
+  CFG_OFFLINE_ALERT_SECONDS: num('CFG_OFFLINE_ALERT_SECONDS', 1800),
   CFG_LOW_BATTERY: num('CFG_LOW_BATTERY', 20),
   CFG_RETENTION_DAYS: num('CFG_RETENTION_DAYS', 1825),
+  // Default data-log / poll interval (seconds) — admin-editable in Thresholds tab.
+  // Applies to the RUT200 IP-pull poller; per-device push interval (Field Devices)
+  // is set separately and takes priority for devices that use push mode.
+  CFG_LOG_INTERVAL: num('CFG_LOG_INTERVAL', num('POLL_INTERVAL', 20)),
+  // Database logging interval (seconds): one stored row per sensor per interval.
+  // Devices may push more often (CFG_LOG_INTERVAL) so OFFLINE is detected fast.
+  // Starting default only - editable live in Admin -> Thresholds. 0 = store every push.
+  CFG_DB_LOG_INTERVAL: num('CFG_DB_LOG_INTERVAL', 600),
 
   // Email (SMTP) transport for email alerts. If unset, email runs dry-run.
   SMTP_HOST: process.env.SMTP_HOST || '',
@@ -76,6 +110,19 @@ const config = {
   SMS_API_KEY: process.env.SMS_API_KEY || '',
   SMS_SENDER: process.env.SMS_SENDER || 'HMNISH',
   SMS_URL: process.env.SMS_URL || '',
+  // --- India DLT (provider "fast2sms_dlt"): Fast2SMS *message IDs* of the approved DLT templates ---
+  SMS_DLT_TPL_TEMP: process.env.SMS_DLT_TPL_TEMP || '',       // warning / high / critical / rapid-rise (temperature)
+  SMS_DLT_TPL_OFFLINE: process.env.SMS_DLT_TPL_OFFLINE || '', // loco offline
+  SMS_DLT_TPL_BATT: process.env.SMS_DLT_TPL_BATT || '',       // low battery (optional)
+  SMS_API_BASE: process.env.SMS_API_BASE || 'https://www.fast2sms.com', // override only for testing
+  // Do not SMS the same recipient again for the same loco+severity within N minutes (0 = no limit).
+  SMS_REPEAT_MIN: num('SMS_REPEAT_MIN', 30),
+  // Safety-net only (see notify.js): the alert engine itself no longer re-raises a sustained fault,
+  // so this should rarely trigger. Higher than SMS_REPEAT_MIN since email has no per-message cost.
+  EMAIL_REPEAT_MIN: num('EMAIL_REPEAT_MIN', 60),
+  // How often the "still offline" reminder email repeats while an outage continues (separate from
+  // EMAIL_REPEAT_MIN above, which is the general safety net for every other severity).
+  OFFLINE_EMAIL_REMINDER_MIN: num('OFFLINE_EMAIL_REMINDER_MIN', 180),
 
   // Escalation scan interval (seconds).
   ESCALATION_INTERVAL: num('ESCALATION_INTERVAL', 60),
@@ -109,6 +156,7 @@ config.defaultThresholds = function () {
   return {
     CFG_WARN_TEMP: config.CFG_WARN_TEMP, CFG_HIGH_TEMP: config.CFG_HIGH_TEMP,
     CFG_CRIT_TEMP: config.CFG_CRIT_TEMP, CFG_OFFLINE_SECONDS: config.CFG_OFFLINE_SECONDS,
+    CFG_OFFLINE_ALERT_SECONDS: config.CFG_OFFLINE_ALERT_SECONDS,
     CFG_LOW_BATTERY: config.CFG_LOW_BATTERY,
     CFG_RISE_RATE: num('CFG_RISE_RATE', 3), // deg C per minute -> rapid-rise alert
     CFG_LOG_INTERVAL_SECONDS: num('CFG_LOG_INTERVAL_SECONDS', 60), // history/trend logging throttle
@@ -124,6 +172,8 @@ config.defaultThresholds = function () {
     CFG_BEARING_BASE: num('CFG_BEARING_BASE', 50000),
     CFG_BEARING_LOAD_FACTOR: num('CFG_BEARING_LOAD_FACTOR', 1.0),
     CFG_BEARING_SPEED_FACTOR: num('CFG_BEARING_SPEED_FACTOR', 1.0),
+    CFG_LOG_INTERVAL: config.CFG_LOG_INTERVAL, // seconds — device push / poll interval
+    CFG_DB_LOG_INTERVAL: config.CFG_DB_LOG_INTERVAL, // seconds — DB logging interval (0 = every push)
   };
 };
 

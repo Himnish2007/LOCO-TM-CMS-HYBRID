@@ -21,7 +21,8 @@ const config = require('./config');
 // ---------------------------------------------------------------------------
 
 function startPoller(store) {
-  if (!config.POLL_INTERVAL) { console.log('[poller] disabled (POLL_INTERVAL=0)'); return () => {}; }
+  let stopped = false;
+  let timer = null;
 
   async function pollLoco(c) {
     const url = `http://${c.rut200_ip}:${c.rut200_port || 80}${c.rut200_path || '/readings'}`;
@@ -46,14 +47,27 @@ function startPoller(store) {
     }
   }
 
-  async function tick() {
-    const locos = store.pollableLocos();
-    for (const c of locos) await pollLoco(c);
+  function currentIntervalSec() {
+    const th = store.getThresholds ? store.getThresholds() : null;
+    const v = th && th.CFG_LOG_INTERVAL;
+    return (Number.isFinite(v) && v > 0) ? v : config.CFG_LOG_INTERVAL;
   }
 
-  const interval = setInterval(tick, config.POLL_INTERVAL * 1000);
-  console.log(`[poller] polling RUT200-configured locos every ${config.POLL_INTERVAL}s`);
-  return () => clearInterval(interval);
+  async function tick() {
+    if (stopped) return;
+    const interval = currentIntervalSec();
+    if (interval > 0) {
+      const locos = store.pollableLocos();
+      for (const c of locos) await pollLoco(c);
+    }
+    if (!stopped) timer = setTimeout(tick, Math.max(5, interval) * 1000);
+  }
+
+  const first = currentIntervalSec();
+  if (!first) { console.log('[poller] disabled (Log interval = 0)'); return () => {}; }
+  console.log(`[poller] polling RUT200-configured locos every ${first}s (Admin → Thresholds → Log interval — changes apply live, no restart needed)`);
+  timer = setTimeout(tick, first * 1000);
+  return () => { stopped = true; if (timer) clearTimeout(timer); };
 }
 
 module.exports = { startPoller };

@@ -57,7 +57,23 @@ function createDb(databaseUrl, injectedClient) {
       ADD COLUMN IF NOT EXISTS io_link_status text`).catch(() => {});
     await q(`CREATE INDEX IF NOT EXISTS idx_readings_sensor_ts ON readings (sensor_id, ts DESC)`);
     await q(`CREATE INDEX IF NOT EXISTS idx_readings_ts ON readings (ts DESC)`);
+    // loco-level history (Reports -> Loco History, Admin loco detail) filters by loco_id; without
+    // this index those queries fell back to scanning every row and filtering, which gets slow as the
+    // readings table grows into the hundreds of millions of rows at full fleet scale.
+    await q(`CREATE INDEX IF NOT EXISTS idx_readings_loco_ts ON readings (loco_id, ts DESC)`);
     await q(`CREATE TABLE IF NOT EXISTS app_state (id integer PRIMARY KEY, data jsonb NOT NULL, updated timestamptz DEFAULT now())`);
+    // Append-only, SQL-queryable alert history (separate from the current-state JSON in app_state,
+    // which only holds the latest snapshot). One row per state transition, kept forever.
+    await q(`CREATE TABLE IF NOT EXISTS alert_events (
+      id bigserial PRIMARY KEY,
+      alert_id integer NOT NULL,
+      event text NOT NULL,
+      severity text, sensor_id text, loco_id text, shed_id text, tm_id text,
+      message text, actor text, detail text,
+      at timestamptz NOT NULL DEFAULT now()
+    )`);
+    await q(`CREATE INDEX IF NOT EXISTS idx_alert_events_loco_at ON alert_events (loco_id, at DESC)`);
+    await q(`CREATE INDEX IF NOT EXISTS idx_alert_events_alert_id ON alert_events (alert_id)`);
     // Optional TimescaleDB hypertable — ignored gracefully if unavailable.
     let hyper = false;
     try {
@@ -87,6 +103,23 @@ function createDb(databaseUrl, injectedClient) {
     );
   }
 
+  // One row per alert state transition (raised/resolved/acknowledged/closed) — an append-only,
+  // SQL-queryable history, kept separate from the mutable current-state snapshot in app_state.
+  async function logAlertEvent(e) {
+    await q(
+      `INSERT INTO alert_events (alert_id,event,severity,sensor_id,loco_id,shed_id,tm_id,message,actor,detail)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [e.alert_id, e.event, e.severity || null, e.sensor_id || null, e.loco_id || null, e.shed_id || null,
+        e.tm_id || null, e.message || null, e.actor || null, e.detail || null]
+    );
+  }
+  async function alertHistoryForLoco(locoId, fromIso, toIso, cap) {
+    const res = await q(
+      `SELECT * FROM alert_events WHERE loco_id = $1 AND at BETWEEN $2 AND $3 ORDER BY at DESC, id DESC LIMIT $4`,
+      [locoId, fromIso, toIso, cap || 1000]);
+    return res.rows;
+  }
+
   // Last reading per sensor — to repopulate live view after a restart.
   async function latestPerSensor() {
     const res = await q(
@@ -108,18 +141,19 @@ function createDb(databaseUrl, injectedClient) {
   async function historyRange(sensorId, fromIso, toIso, cap) {
     const res = await q(
       `SELECT ts, temperature FROM readings
-       WHERE sensor_id = $1 AND ts BETWEEN $2 AND $3 ORDER BY ts ASC LIMIT $4`,
+       WHERE sensor_id = $1 AND ts BETWEEN $2 AND $3 ORDER BY ts DESC LIMIT $4`,
       [sensorId, fromIso, toIso, cap || 20000]);
-    return res.rows;
+    // newest-first + reverse: if the cap is hit, the OLDEST rows are dropped, never the latest ones
+    return res.rows.reverse();
   }
 
   // All readings for one loco in a date range (for historical reports).
   async function historyForLoco(locoId, fromIso, toIso, cap) {
     const res = await q(
       `SELECT sensor_id, tm_id, ts, temperature FROM readings
-       WHERE loco_id = $1 AND ts BETWEEN $2 AND $3 ORDER BY ts ASC LIMIT $4`,
+       WHERE loco_id = $1 AND ts BETWEEN $2 AND $3 ORDER BY ts DESC LIMIT $4`,
       [locoId, fromIso, toIso, cap || 50000]);
-    return res.rows;
+    return res.rows.reverse();
   }
 
   // Retention: delete readings older than N days. Returns rows removed.
@@ -142,6 +176,7 @@ function createDb(databaseUrl, injectedClient) {
   }
 
   return { init, insertReading, latestPerSensor, recentSeries, historyRange, historyForLoco, purgeOld, saveState, loadState,
+    logAlertEvent, alertHistoryForLoco,
     _setClient: (c) => { client = c; } };
 }
 
